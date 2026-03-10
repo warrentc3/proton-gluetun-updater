@@ -67,9 +67,10 @@ def get_credentials() -> tuple[str, str]:
     password = os.environ.get("PROTON_PASSWORD")
 
     if not username:
-        username = input("Proton username: ")
+        print("Proton username: ", end="", file=sys.stderr, flush=True)
+        username = input()
     if not password:
-        password = getpass.getpass("Proton password: ")
+        password = getpass.getpass("Proton password: ", stream=sys.stderr)
 
     return username, password
 
@@ -89,7 +90,11 @@ async def fetch_server_list(username: str, password: str) -> dict:
     except ProtonAPI2FANeeded:
         totp_code = os.environ.get("PROTON_2FA")
         if not totp_code:
-            totp_code = input("2FA code: ")
+            if not sys.stdin.isatty():
+                print("Error: 2FA required. Set the PROTON_2FA environment variable.", file=sys.stderr)
+                sys.exit(1)
+            print("2FA code: ", end="", file=sys.stderr, flush=True)
+            totp_code = input()
 
         success = await session.async_validate_2fa_code(totp_code)
         if not success:

@@ -15,14 +15,14 @@ The generated JSON follows the [Gluetun custom provider](https://github.com/qdm1
 ```bash
 pip install -r requirements.txt
 
-# Interactive (prompts for credentials)
+# Interactive (prompts for credentials and 2FA code)
 python protonvpn_gluetun_updater.py > servers.json
 
 # Via environment variables
-PROTON_USERNAME=user PROTON_PASSWORD=pass python protonvpn_gluetun_updater.py > servers.json
-
-# Write directly to a file
-OUTPUT_FILE=/gluetun/servers.json PROTON_USERNAME=user PROTON_PASSWORD=pass python protonvpn_gluetun_updater.py
+PROTON_USERNAME=user \
+PROTON_PASSWORD=pass \
+PROTON_2FA=123456 \
+python protonvpn_gluetun_updater.py > servers.json
 ```
 
 ### Docker
@@ -30,20 +30,16 @@ OUTPUT_FILE=/gluetun/servers.json PROTON_USERNAME=user PROTON_PASSWORD=pass pyth
 ```bash
 docker build -t protonvpn-gluetun-updater .
 
-# Output to stdout
 docker run --rm \
   -e PROTON_USERNAME=user \
   -e PROTON_PASSWORD=pass \
-  protonvpn-gluetun-updater > servers.json
-
-# Write to a mounted volume (e.g. Gluetun data directory)
-docker run --rm \
-  -e PROTON_USERNAME=user \
-  -e PROTON_PASSWORD=pass \
-  -e OUTPUT_FILE=/gluetun/servers.json \
-  -v /path/to/gluetun:/gluetun \
+  -e PROTON_2FA=123456 \
+  -e OUTPUT_FILE=/out/servers.json \
+  -v /path/to/output:/out \
   protonvpn-gluetun-updater
 ```
+
+> **Note:** When using Docker, the `PROTON_2FA` environment variable is required if your account has 2FA enabled (interactive prompt is not available).
 
 ## Environment variables
 
@@ -51,7 +47,7 @@ docker run --rm \
 |---|---|---|
 | `PROTON_USERNAME` | Yes | Proton account username |
 | `PROTON_PASSWORD` | Yes | Proton account password |
-| `PROTON_2FA` | No | TOTP code (if 2FA is enabled) |
+| `PROTON_2FA` | No | TOTP code (required if 2FA is enabled on the account) |
 | `OUTPUT_FILE` | No | Output file path (defaults to stdout) |
 
 ## License
