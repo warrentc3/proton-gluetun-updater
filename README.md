@@ -19,6 +19,9 @@ The Proton API returns a list of **logical servers**, each containing one or mor
       "City": "Zurich",
       "Domain": "node-ch-9999.protonvpn.net",
       "Features": 12,
+      "Load": 23,
+      "Score": 1.0234,
+      "Status": 1,
       "Servers": [
         {
           "EntryIP": "146.70.226.194",
@@ -116,9 +119,37 @@ docker run --rm \
   -e OUTPUT_FILE=/out/servers.json \
   -v /path/to/output:/out \
   protonvpn-gluetun-updater
+
+# Only servers with load <= 50% and keep the 100 best
+docker run --rm \
+  -e PROTON_USERNAME=user \
+  -e PROTON_PASSWORD=pass \
+  -e PROTON_2FA=123456 \
+  -e MAX_LOAD=50 \
+  -e MAX_SERVERS=100 \
+  -e OUTPUT_FILE=/out/servers.json \
+  -v /path/to/output:/out \
+  protonvpn-gluetun-updater
 ```
 
 > **Note:** When using Docker, the `PROTON_2FA` environment variable is required if your account has 2FA enabled (interactive prompt is not available).
+
+### Filtering and scoring
+
+Each logical server returned by the Proton API includes two fields used for ranking:
+
+- **`Load`** (0–100) — current usage percentage of the server
+- **`Score`** (float, lower = better) — internal Proton metric that combines server load and geographic proximity to the user
+
+The filtering pipeline works as follows:
+
+1. **Sort** all logical servers by `Score` (ascending — best servers first)
+2. **Filter by load** — if `MAX_LOAD` is set, discard any server where `Load > MAX_LOAD`
+3. **Truncate** — if `MAX_SERVERS` is set, keep only the first N servers from the sorted list
+
+Both filters are optional and can be combined. For example, `MAX_LOAD=50 MAX_SERVERS=100` first removes all servers above 50% load, then keeps the 100 best-scored among the remaining ones.
+
+Without any filter, all servers are exported (sorted by score).
 
 ## Environment variables
 
@@ -128,6 +159,8 @@ docker run --rm \
 | `PROTON_PASSWORD` | Yes | Proton account password |
 | `PROTON_2FA` | No | TOTP code (required if 2FA is enabled on the account) |
 | `OUTPUT_FILE` | No | Output file path (defaults to stdout) |
+| `MAX_LOAD` | No | Only include servers with load <= this value (0-100) |
+| `MAX_SERVERS` | No | Limit to the N best servers, sorted by score |
 
 ## License
 

@@ -10,6 +10,8 @@ Environment variables (or interactive prompt):
     PROTON_PASSWORD   Proton account password
     PROTON_2FA        TOTP code (optional, only if 2FA is enabled)
     OUTPUT_FILE       Output file path (default: stdout)
+    MAX_LOAD          Max server load percentage to include (0-100, default: no filter)
+    MAX_SERVERS       Max number of servers to export, sorted by load (default: no limit)
 """
 import asyncio
 import getpass
@@ -108,9 +110,18 @@ async def fetch_server_list(username: str, password: str) -> dict:
     return response
 
 
-def transform(api_data: dict) -> dict:
+def transform(api_data: dict, max_load: int | None = None, max_servers: int | None = None) -> dict:
+    # Sort logical servers by score (lower = better, factors in load + proximity)
+    logicals = sorted(api_data["LogicalServers"], key=lambda s: s.get("Score", float("inf")))
+
+    if max_load is not None:
+        logicals = [s for s in logicals if s.get("Load", 100) <= max_load]
+
+    if max_servers is not None:
+        logicals = logicals[:max_servers]
+
     servers = []
-    for logical in api_data["LogicalServers"]:
+    for logical in logicals:
         features = logical.get("Features", 0)
         common = {
             "country": country_name(logical["ExitCountry"]),
@@ -156,20 +167,35 @@ def transform(api_data: dict) -> dict:
 
 async def main():
     username, password = get_credentials()
+
+    max_load_env = os.environ.get("MAX_LOAD")
+    max_load = int(max_load_env) if max_load_env else None
+
+    max_servers_env = os.environ.get("MAX_SERVERS")
+    max_servers = int(max_servers_env) if max_servers_env else None
+
     api_data = await fetch_server_list(username, password)
-    result = transform(api_data)
+    total = len(api_data.get("LogicalServers", []))
+    result = transform(api_data, max_load=max_load, max_servers=max_servers)
 
     output = json.dumps(result, indent=2)
     count = len(result["protonvpn"]["servers"])
 
     output_file = os.environ.get("OUTPUT_FILE")
+    filters = []
+    if max_load is not None:
+        filters.append(f"max_load={max_load}%")
+    if max_servers is not None:
+        filters.append(f"max_servers={max_servers}")
+    filter_info = f" ({', '.join(filters)})" if filters else ""
+
     if output_file:
         with open(output_file, "w") as f:
             f.write(output)
-        print(f"{count} servers written to {output_file}", file=sys.stderr)
+        print(f"{count} servers written to {output_file} (from {total} logicals{filter_info})", file=sys.stderr)
     else:
         print(output)
-        print(f"\n# {count} servers exported", file=sys.stderr)
+        print(f"\n# {count} servers exported (from {total} logicals{filter_info})", file=sys.stderr)
 
 
 if __name__ == "__main__":
