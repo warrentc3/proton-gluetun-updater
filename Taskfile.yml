@@ -1,0 +1,53 @@
+version: "3"
+
+vars:
+  IMAGE_NAME: protonvpn-gluetun-updater
+
+tasks:
+  build:
+    desc: Build the Docker image.
+    summary: |
+      Build the Docker image for the protonvpn-gluetun-updater.
+
+      The image is based on python:3.12-slim and includes all
+      dependencies needed to fetch and filter ProtonVPN servers.
+    preconditions:
+      - sh: command -v docker
+        msg: Docker is not installed or not in PATH.
+      - sh: test -f Dockerfile
+        msg: Dockerfile not found in the current directory.
+    cmds:
+      - docker build -t {{.IMAGE_NAME}} .
+
+  run:
+    desc: Run the updater via Docker.
+    summary: |
+      Build then run the protonvpn-gluetun-updater container.
+
+      The container receives OUTPUT_FILE and MAX_LOAD as environment
+      variables. The parent directory of OUTPUT_FILE is mounted as a
+      volume so the container can write the servers.json file.
+    deps:
+      - build
+    env:
+      OUTPUT_FILE: /mnt/nas/k8s/volumes/gluetun/servers.json
+      MAX_LOAD: "50"
+    preconditions:
+      - sh: test -d $(dirname $OUTPUT_FILE)
+        msg: "Output directory does not exist: $(dirname $OUTPUT_FILE)"
+    cmds:
+      - docker run --rm -it
+        -e OUTPUT_FILE
+        -e MAX_LOAD
+        -e PROTON_USERNAME
+        -v $(dirname $OUTPUT_FILE):$(dirname $OUTPUT_FILE)
+        {{.IMAGE_NAME}}
+
+  update-gluetun-protonvpn-servers:
+    desc: Update gluetun protonvpn servers list.
+    summary: |
+      Alias for the 'run' task.
+
+      Kept for backward compatibility.
+    cmds:
+      - task: run
