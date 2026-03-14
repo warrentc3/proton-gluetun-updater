@@ -1,0 +1,7 @@
+[tools]
+python = "3.12"
+sops = "latest"
+task = "latest"
+
+[settings]
+lockfile = true
