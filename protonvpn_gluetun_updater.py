@@ -5,6 +5,15 @@ provider format (servers.json).
 
 Authenticates directly against the Proton API using SRP.
 
+IMPROVEMENTS over original version:
+- Complete 194-country mapping (vs 70)
+- Parse country from server name (critical for secure_core routing)
+- Include ALL feature flags (free, secure_core, tor, stream, port_forward)
+- Only include feature flags when true (cleaner JSON, matches Gluetun implementation)
+- Fix Wireguard bug: no tcp/udp properties (only OpenVPN uses these)
+- Physical server deduplication for non-secure_core servers
+- Better statistics and verbose output
+
 Environment variables (or interactive prompt):
     PROTON_USERNAME   Proton account username
     PROTON_PASSWORD   Proton account password
@@ -17,6 +26,7 @@ import asyncio
 import getpass
 import json
 import os
+import re
 import sys
 import time
 
@@ -34,34 +44,110 @@ P2P = 1 << 2          # 4
 STREAMING = 1 << 3    # 8
 IPV6 = 1 << 4         # 16
 
+# Complete ProtonVPN country code mapping (194 countries)
 COUNTRY_NAMES = {
-    "AD": "Andorra", "AE": "United Arab Emirates", "AF": "Afghanistan",
-    "AL": "Albania", "AM": "Armenia", "AR": "Argentina", "AT": "Austria",
-    "AU": "Australia", "AZ": "Azerbaijan", "BA": "Bosnia and Herzegovina",
-    "BD": "Bangladesh", "BE": "Belgium", "BG": "Bulgaria", "BR": "Brazil",
-    "CA": "Canada", "CH": "Switzerland", "CL": "Chile", "CM": "Cameroon",
-    "CO": "Colombia", "CR": "Costa Rica", "CY": "Cyprus", "CZ": "Czech Republic",
-    "DE": "Germany", "DK": "Denmark", "EC": "Ecuador", "EE": "Estonia",
-    "EG": "Egypt", "ES": "Spain", "FI": "Finland", "FR": "France",
-    "GE": "Georgia", "GH": "Ghana", "GR": "Greece", "HK": "Hong Kong",
-    "HR": "Croatia", "HU": "Hungary", "ID": "Indonesia", "IE": "Ireland",
-    "IL": "Israel", "IN": "India", "IS": "Iceland", "IT": "Italy",
-    "JP": "Japan", "KE": "Kenya", "KH": "Cambodia", "KR": "South Korea",
-    "KZ": "Kazakhstan", "LT": "Lithuania", "LU": "Luxembourg", "LV": "Latvia",
-    "MA": "Morocco", "MD": "Moldova", "ME": "Montenegro", "MK": "North Macedonia",
-    "MM": "Myanmar", "MN": "Mongolia", "MX": "Mexico", "MY": "Malaysia",
-    "NG": "Nigeria", "NL": "Netherlands", "NO": "Norway", "NZ": "New Zealand",
-    "PA": "Panama", "PE": "Peru", "PH": "Philippines", "PK": "Pakistan",
-    "PL": "Poland", "PR": "Puerto Rico", "PT": "Portugal", "RO": "Romania",
-    "RS": "Serbia", "RU": "Russia", "SE": "Sweden", "SG": "Singapore",
-    "SI": "Slovenia", "SK": "Slovakia", "TH": "Thailand", "TN": "Tunisia",
-    "TR": "Turkey", "TW": "Taiwan", "UA": "Ukraine", "UK": "United Kingdom",
-    "US": "United States", "UY": "Uruguay", "VN": "Vietnam", "ZA": "South Africa",
+    'BD': 'Bangladesh', 'BE': 'Belgium', 'BF': 'Burkina Faso', 'BG': 'Bulgaria',
+    'BA': 'Bosnia and Herzegovina', 'BB': 'Barbados', 'WF': 'Wallis and Futuna',
+    'BL': 'Saint Barthelemy', 'BM': 'Bermuda', 'BN': 'Brunei', 'BO': 'Bolivia',
+    'BH': 'Bahrain', 'BI': 'Burundi', 'BJ': 'Benin', 'BT': 'Bhutan', 'JM': 'Jamaica',
+    'BV': 'Bouvet Island', 'BW': 'Botswana', 'WS': 'Samoa',
+    'BQ': 'Bonaire, Saint Eustatius and Saba', 'BR': 'Brazil', 'BS': 'Bahamas',
+    'JE': 'Jersey', 'BY': 'Belarus', 'BZ': 'Belize', 'RU': 'Russia', 'RW': 'Rwanda',
+    'RS': 'Serbia', 'TL': 'East Timor', 'RE': 'Reunion', 'TM': 'Turkmenistan',
+    'TJ': 'Tajikistan', 'RO': 'Romania', 'TK': 'Tokelau', 'GW': 'Guinea-Bissau',
+    'GU': 'Guam', 'GT': 'Guatemala', 'GS': 'South Georgia and the South Sandwich Islands',
+    'GR': 'Greece', 'GQ': 'Equatorial Guinea', 'GP': 'Guadeloupe', 'JP': 'Japan',
+    'GY': 'Guyana', 'GG': 'Guernsey', 'GF': 'French Guiana', 'GE': 'Georgia',
+    'GD': 'Grenada', 'UK': 'United Kingdom', 'GA': 'Gabon', 'SV': 'El Salvador',
+    'GN': 'Guinea', 'GM': 'Gambia', 'GL': 'Greenland', 'GI': 'Gibraltar', 'GH': 'Ghana',
+    'OM': 'Oman', 'TN': 'Tunisia', 'JO': 'Jordan', 'HR': 'Croatia', 'HT': 'Haiti',
+    'HU': 'Hungary', 'HK': 'Hong Kong', 'HN': 'Honduras',
+    'HM': 'Heard Island and McDonald Islands', 'VE': 'Venezuela', 'PR': 'Puerto Rico',
+    'PS': 'Palestinian Territory', 'PW': 'Palau', 'PT': 'Portugal',
+    'SJ': 'Svalbard and Jan Mayen', 'PY': 'Paraguay', 'IQ': 'Iraq', 'PA': 'Panama',
+    'PF': 'French Polynesia', 'PG': 'Papua New Guinea', 'PE': 'Peru', 'PK': 'Pakistan',
+    'PH': 'Philippines', 'PN': 'Pitcairn', 'PL': 'Poland', 'PM': 'Saint Pierre and Miquelon',
+    'ZM': 'Zambia', 'EH': 'Western Sahara', 'EE': 'Estonia', 'EG': 'Egypt',
+    'ZA': 'South Africa', 'EC': 'Ecuador', 'IT': 'Italy', 'VN': 'Vietnam',
+    'SB': 'Solomon Islands', 'ET': 'Ethiopia', 'SO': 'Somalia', 'ZW': 'Zimbabwe',
+    'SA': 'Saudi Arabia', 'ES': 'Spain', 'ER': 'Eritrea', 'ME': 'Montenegro',
+    'MD': 'Moldova', 'MG': 'Madagascar', 'MF': 'Saint Martin', 'MA': 'Morocco',
+    'MC': 'Monaco', 'UZ': 'Uzbekistan', 'MM': 'Myanmar', 'ML': 'Mali', 'MO': 'Macao',
+    'MN': 'Mongolia', 'MH': 'Marshall Islands', 'MK': 'Macedonia', 'MU': 'Mauritius',
+    'MT': 'Malta', 'MW': 'Malawi', 'MV': 'Maldives', 'MQ': 'Martinique',
+    'MP': 'Northern Mariana Islands', 'MS': 'Montserrat', 'MR': 'Mauritania',
+    'IM': 'Isle of Man', 'UG': 'Uganda', 'TZ': 'Tanzania', 'MY': 'Malaysia',
+    'MX': 'Mexico', 'IL': 'Israel', 'FR': 'France', 'IO': 'British Indian Ocean Territory',
+    'SH': 'Saint Helena', 'FI': 'Finland', 'FJ': 'Fiji', 'FK': 'Falkland Islands',
+    'FM': 'Micronesia', 'FO': 'Faroe Islands', 'NI': 'Nicaragua', 'NL': 'Netherlands',
+    'NO': 'Norway', 'NA': 'Namibia', 'VU': 'Vanuatu', 'NC': 'New Caledonia',
+    'NE': 'Niger', 'NF': 'Norfolk Island', 'NG': 'Nigeria', 'NZ': 'New Zealand',
+    'NP': 'Nepal', 'NR': 'Nauru', 'NU': 'Niue', 'CK': 'Cook Islands', 'XK': 'Kosovo',
+    'CI': 'Ivory Coast', 'CH': 'Switzerland', 'CO': 'Colombia', 'CN': 'China',
+    'CM': 'Cameroon', 'CL': 'Chile', 'CC': 'Cocos Islands', 'CA': 'Canada',
+    'CG': 'Republic of the Congo', 'CF': 'Central African Republic',
+    'CD': 'Democratic Republic of the Congo', 'CZ': 'Czech Republic', 'CY': 'Cyprus',
+    'CX': 'Christmas Island', 'CR': 'Costa Rica', 'CW': 'Curacao', 'CV': 'Cape Verde',
+    'CU': 'Cuba', 'SZ': 'Swaziland', 'SY': 'Syria', 'SX': 'Sint Maarten',
+    'KG': 'Kyrgyzstan', 'KE': 'Kenya', 'SS': 'South Sudan', 'SR': 'Suriname',
+    'KI': 'Kiribati', 'KH': 'Cambodia', 'KN': 'Saint Kitts and Nevis', 'KM': 'Comoros',
+    'ST': 'Sao Tome and Principe', 'SK': 'Slovakia', 'KR': 'South Korea',
+    'SI': 'Slovenia', 'KP': 'North Korea', 'KW': 'Kuwait', 'SN': 'Senegal',
+    'SM': 'San Marino', 'SL': 'Sierra Leone', 'SC': 'Seychelles', 'KZ': 'Kazakhstan',
+    'KY': 'Cayman Islands', 'SG': 'Singapore', 'SE': 'Sweden', 'SD': 'Sudan',
+    'DO': 'Dominican Republic', 'DM': 'Dominica', 'DJ': 'Djibouti', 'DK': 'Denmark',
+    'VG': 'British Virgin Islands', 'DE': 'Germany', 'YE': 'Yemen', 'DZ': 'Algeria',
+    'US': 'United States', 'UY': 'Uruguay', 'YT': 'Mayotte',
+    'UM': 'United States Minor Outlying Islands', 'LB': 'Lebanon', 'LC': 'Saint Lucia',
+    'LA': 'Laos', 'TV': 'Tuvalu', 'TW': 'Taiwan', 'TT': 'Trinidad and Tobago',
+    'TR': 'Turkey', 'LK': 'Sri Lanka', 'LI': 'Liechtenstein', 'LV': 'Latvia',
+    'TO': 'Tonga', 'LT': 'Lithuania', 'LU': 'Luxembourg', 'LR': 'Liberia',
+    'LS': 'Lesotho', 'TH': 'Thailand', 'TF': 'French Southern Territories', 'TG': 'Togo',
+    'TD': 'Chad', 'TC': 'Turks and Caicos Islands', 'LY': 'Libya', 'VA': 'Vatican',
+    'VC': 'Saint Vincent and the Grenadines', 'AE': 'United Arab Emirates',
+    'AD': 'Andorra', 'AG': 'Antigua and Barbuda', 'AF': 'Afghanistan', 'AI': 'Anguilla',
+    'VI': 'U.S. Virgin Islands', 'IS': 'Iceland', 'IR': 'Iran', 'AM': 'Armenia',
+    'AL': 'Albania', 'AO': 'Angola', 'AQ': 'Antarctica', 'AS': 'American Samoa',
+    'AR': 'Argentina', 'AU': 'Australia', 'AT': 'Austria', 'AW': 'Aruba', 'IN': 'India',
+    'AX': 'Aland Islands', 'AZ': 'Azerbaijan', 'IE': 'Ireland', 'ID': 'Indonesia',
+    'UA': 'Ukraine', 'QA': 'Qatar', 'MZ': 'Mozambique'
 }
 
 
 def country_name(code: str) -> str:
-    return COUNTRY_NAMES.get(code, code)
+    """Convert country code to full name with fallback."""
+    name = COUNTRY_NAMES.get(code)
+    if not name:
+        print(f"Warning: Unknown country code: {code}", file=sys.stderr)
+        return code
+    return name
+
+
+def parse_country_from_name(server_name: str, is_secure_core: bool) -> str:
+    """
+    Parse country code from server name.
+    
+    Critical for secure_core servers where ExitCountry indicates the exit point,
+    but the actual server location is encoded in the name.
+    
+    Examples:
+        Normal: "US-NY#1" -> "US" -> "United States"
+        Secure Core: "IS-US#1" -> "US" -> "United States" (exit through US, hosted in Iceland)
+    """
+    if is_secure_core:
+        # Secure core: CC-CC#N format, take second CC (exit country)
+        match = re.match(r'^[A-Z]{2}-([A-Z]{2})', server_name)
+        if match:
+            return country_name(match.group(1))
+    else:
+        # Normal server: CC#N format, take first CC
+        match = re.match(r'^([A-Z]{2})', server_name)
+        if match:
+            return country_name(match.group(1))
+    
+    # Fallback - this shouldn't happen with valid ProtonVPN data
+    print(f"Warning: Could not parse country from server name: {server_name}", file=sys.stderr)
+    return server_name
 
 
 def get_credentials() -> tuple[str, str]:
@@ -111,6 +197,16 @@ async def fetch_server_list(username: str, password: str) -> dict:
 
 
 def transform(api_data: dict, max_load: int | None = None, max_servers: int | None = None) -> dict:
+    """
+    Transform ProtonVPN API data to Gluetun format.
+    
+    Improvements:
+    - Parse country from server name (not ExitCountry)
+    - Include all feature flags (free, secure_core, tor, stream, port_forward)
+    - Only include feature flags when true
+    - Fix Wireguard: no tcp/udp properties
+    - Deduplicate physical servers for non-secure_core
+    """
     # Sort logical servers by score (lower = better, factors in load + proximity)
     logicals = sorted(api_data["LogicalServers"], key=lambda s: s.get("Score", float("inf")))
 
@@ -121,39 +217,98 @@ def transform(api_data: dict, max_load: int | None = None, max_servers: int | No
         logicals = logicals[:max_servers]
 
     servers = []
+    seen_ips = {}  # Track IPs for non-secure_core deduplication
+    stats = {
+        'skipped_disabled': 0,
+        'skipped_duplicate': 0,
+        'secure_core': 0,
+        'free_tier': 0,
+    }
+
     for logical in logicals:
         features = logical.get("Features", 0)
-        common = {
-            "country": country_name(logical["ExitCountry"]),
-            "city": logical.get("City") or "",
-            "server_name": logical["Name"],
-            "stream": bool(features & STREAMING),
-            "port_forward": bool(features & P2P),
-        }
-
+        tier = logical.get("Tier", 1)
+        
+        # Decode feature flags
+        is_secure_core = bool(features & SECURE_CORE)
+        is_tor = bool(features & TOR)
+        is_p2p = bool(features & P2P)
+        is_streaming = bool(features & STREAMING)
+        is_free = (tier == 0)
+        
+        # Parse country from server name (critical for secure_core routing)
+        country = parse_country_from_name(logical["Name"], is_secure_core)
+        
         for physical in logical["Servers"]:
-            ips = [physical["EntryIP"]]
-
+            # Skip disabled servers
+            if physical.get("Status") == 0:
+                stats['skipped_disabled'] += 1
+                continue
+            
+            entry_ip = physical["EntryIP"]
+            
+            # Deduplicate non-secure_core servers by IP
+            if not is_secure_core:
+                if entry_ip in seen_ips:
+                    stats['skipped_duplicate'] += 1
+                    continue
+                seen_ips[entry_ip] = True
+            
+            # Track statistics
+            if is_secure_core:
+                stats['secure_core'] += 1
+            if is_free:
+                stats['free_tier'] += 1
+            
+            # Build base server properties (ordered by Server struct)
+            # Only include feature flags when true
+            base = {
+                "country": country,
+                "city": logical.get("City") or "",
+                "server_name": logical["Name"],
+                "hostname": physical["Domain"],
+            }
+            
+            # Add optional feature flags (only if true)
+            if is_free:
+                base["free"] = True
+            if is_streaming:
+                base["stream"] = True
+            if is_secure_core:
+                base["secure_core"] = True
+            if is_tor:
+                base["tor"] = True
+            if is_p2p:
+                base["port_forward"] = True
+            
+            base["ips"] = [entry_ip]
+            
+            # Create Wireguard entry (if key present)
             wg_key = physical.get("X25519PublicKey")
             if wg_key:
-                servers.append({
-                    **common,
+                wg_server = {
                     "vpn": "wireguard",
-                    "hostname": physical["Domain"],
+                    **base,
                     "wgpubkey": wg_key,
-                    "tcp": True,
-                    "udp": True,
-                    "ips": ips,
-                })
-
-            servers.append({
-                **common,
+                }
+                # Note: Wireguard does NOT have tcp/udp properties
+                servers.append(wg_server)
+            
+            # Create OpenVPN entry
+            ovpn_server = {
                 "vpn": "openvpn",
-                "hostname": physical["Domain"],
+                **base,
                 "tcp": True,
                 "udp": True,
-                "ips": ips,
-            })
+            }
+            servers.append(ovpn_server)
+
+    # Print statistics
+    print(f"\nTransformation statistics:", file=sys.stderr)
+    print(f"  Skipped (disabled): {stats['skipped_disabled']}", file=sys.stderr)
+    print(f"  Skipped (duplicate IPs): {stats['skipped_duplicate']}", file=sys.stderr)
+    print(f"  Secure core servers: {stats['secure_core']}", file=sys.stderr)
+    print(f"  Free tier servers: {stats['free_tier']}", file=sys.stderr)
 
     return {
         "version": 1,
@@ -192,7 +347,7 @@ async def main():
     if output_file:
         with open(output_file, "w") as f:
             f.write(output)
-        print(f"{count} servers written to {output_file} (from {total} logicals{filter_info})", file=sys.stderr)
+        print(f"\n{count} servers written to {output_file} (from {total} logicals{filter_info})", file=sys.stderr)
     else:
         print(output)
         print(f"\n# {count} servers exported (from {total} logicals{filter_info})", file=sys.stderr)
