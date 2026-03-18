@@ -21,6 +21,7 @@ Environment variables (or interactive prompt):
     OUTPUT_FILE       Output file path (default: stdout)
     MAX_LOAD          Max server load percentage to include (0-100, default: no filter)
     MAX_SERVERS       Max number of servers to export, sorted by load (default: no limit)
+    INCLUDE_IPV6      Include IPv6 addresses in server entries (1/true/yes or 0/false/no, default: false)
 """
 import asyncio
 import getpass
@@ -196,7 +197,7 @@ async def fetch_server_list(username: str, password: str) -> dict:
     return response
 
 
-def transform(api_data: dict, max_load: int | None = None, max_servers: int | None = None) -> dict:
+def transform(api_data: dict, max_load: int | None = None, max_servers: int | None = None, include_ipv6: bool = True) -> dict:
     """
     Transform ProtonVPN API data to Gluetun format.
     
@@ -206,6 +207,7 @@ def transform(api_data: dict, max_load: int | None = None, max_servers: int | No
     - Only include feature flags when true
     - Fix Wireguard: no tcp/udp properties
     - Deduplicate physical servers for non-secure_core
+    - Optional IPv6 address inclusion
     """
     # Sort logical servers: secure_core first, then tor, then by country, city, and score
     logicals = sorted(
@@ -256,6 +258,13 @@ def transform(api_data: dict, max_load: int | None = None, max_servers: int | No
             
             entry_ip = physical["EntryIP"]
             
+            # Collect all IPs (IPv4 and optionally IPv6)
+            ips = [entry_ip]
+            if include_ipv6:
+                entry_ipv6 = physical.get("EntryIPv6")
+                if entry_ipv6:
+                    ips.append(entry_ipv6)
+            
             # Deduplicate non-secure_core servers by IP
             if not is_secure_core:
                 if entry_ip in seen_ips:
@@ -290,7 +299,7 @@ def transform(api_data: dict, max_load: int | None = None, max_servers: int | No
                 ovpn_server["tor"] = True
             if is_p2p:
                 ovpn_server["port_forward"] = True
-            ovpn_server["ips"] = [entry_ip]
+            ovpn_server["ips"] = ips
             servers.append(ovpn_server)
             
             # Create Wireguard entry (if key present, ordered by Server struct definition)
@@ -315,7 +324,7 @@ def transform(api_data: dict, max_load: int | None = None, max_servers: int | No
                     wg_server["tor"] = True
                 if is_p2p:
                     wg_server["port_forward"] = True
-                wg_server["ips"] = [entry_ip]
+                wg_server["ips"] = ips
                 servers.append(wg_server)
 
     # Print statistics
@@ -344,9 +353,13 @@ async def main():
     max_servers_env = os.environ.get("MAX_SERVERS")
     max_servers = int(max_servers_env) if max_servers_env else None
 
+    # Parse INCLUDE_IPV6 (default: false)
+    include_ipv6_env = os.environ.get("INCLUDE_IPV6", "false").lower()
+    include_ipv6 = include_ipv6_env in ("1", "true", "yes")
+
     api_data = await fetch_server_list(username, password)
     total = len(api_data.get("LogicalServers", []))
-    result = transform(api_data, max_load=max_load, max_servers=max_servers)
+    result = transform(api_data, max_load=max_load, max_servers=max_servers, include_ipv6=include_ipv6)
 
     output = json.dumps(result, indent=2)
     count = len(result["protonvpn"]["servers"])
