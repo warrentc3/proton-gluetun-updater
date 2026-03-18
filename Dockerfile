@@ -11,4 +11,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY protonvpn_gluetun_updater.py .
 
+# Default environment variables
+ENV INCLUDE_IPV6=false
+
 ENTRYPOINT ["python", "protonvpn_gluetun_updater.py"]

@@ -105,6 +105,12 @@ PROTON_USERNAME=user \
 PROTON_PASSWORD=pass \
 PROTON_2FA=123456 \
 python protonvpn_gluetun_updater.py > servers.json
+
+# Include IPv6 addresses
+PROTON_USERNAME=user \
+PROTON_PASSWORD=pass \
+INCLUDE_IPV6=true \
+python protonvpn_gluetun_updater.py > servers.json
 ```
 
 ### Docker
@@ -127,6 +133,15 @@ docker run --rm \
   -e PROTON_2FA=123456 \
   -e MAX_LOAD=50 \
   -e MAX_SERVERS=100 \
+  -e OUTPUT_FILE=/out/servers.json \
+  -v /path/to/output:/out \
+  protonvpn-gluetun-updater
+
+# Include IPv6 addresses
+docker run --rm \
+  -e PROTON_USERNAME=user \
+  -e PROTON_PASSWORD=pass \
+  -e INCLUDE_IPV6=true \
   -e OUTPUT_FILE=/out/servers.json \
   -v /path/to/output:/out \
   protonvpn-gluetun-updater
@@ -161,6 +176,7 @@ Without any filter, all servers are exported (sorted by score).
 | `OUTPUT_FILE` | No | Output file path (defaults to stdout) |
 | `MAX_LOAD` | No | Only include servers with load <= this value (0-100) |
 | `MAX_SERVERS` | No | Limit to the N best servers, sorted by score |
+| `INCLUDE_IPV6` | No | Include IPv6 addresses in server entries (`1`/`true`/`yes` or `0`/`false`/`no`, default: `false`) |
 
 ## License
 
