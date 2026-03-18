@@ -35,7 +35,7 @@ from proton.session.exceptions import ProtonAPI2FANeeded
 
 APP_VERSION = "linux-vpn-cli@4.15.2"
 USER_AGENT = "ProtonVPN/4.15.2 (Linux)"
-LOGICALS_ENDPOINT = "/vpn/v1/logicals?SecureCoreFilter=all"
+LOGICALS_ENDPOINT = "/vpn/v1/logicals?WithIpV6=1&SecureCoreFilter=all"
 
 # Feature bitmask (from proton.vpn.session.servers.types.ServerFeatureEnum)
 SECURE_CORE = 1 << 0  # 1
@@ -207,8 +207,17 @@ def transform(api_data: dict, max_load: int | None = None, max_servers: int | No
     - Fix Wireguard: no tcp/udp properties
     - Deduplicate physical servers for non-secure_core
     """
-    # Sort logical servers by score (lower = better, factors in load + proximity)
-    logicals = sorted(api_data["LogicalServers"], key=lambda s: s.get("Score", float("inf")))
+    # Sort logical servers: secure_core first, then tor, then by country, city, and score
+    logicals = sorted(
+        api_data["LogicalServers"],
+        key=lambda s: (
+            not bool(s.get("Features", 0) & SECURE_CORE),  # secure_core first
+            not bool(s.get("Features", 0) & TOR),           # then tor
+            parse_country_from_name(s["Name"], bool(s.get("Features", 0) & SECURE_CORE)),  # country alphabetically
+            s.get("City", ""),                              # city alphabetically
+            s.get("Score", float("inf"))                    # score ascending (lower is better)
+        )
+    )
 
     if max_load is not None:
         logicals = [s for s in logicals if s.get("Load", 100) <= max_load]
@@ -260,48 +269,54 @@ def transform(api_data: dict, max_load: int | None = None, max_servers: int | No
             if is_free:
                 stats['free_tier'] += 1
             
-            # Build base server properties (ordered by Server struct)
+            # Create OpenVPN entry (ordered by Server struct definition)
             # Only include feature flags when true
-            base = {
+            ovpn_server = {
+                "vpn": "openvpn",
                 "country": country,
                 "city": logical.get("City") or "",
                 "server_name": logical["Name"],
                 "hostname": physical["Domain"],
+                "tcp": True,
+                "udp": True,
             }
-            
-            # Add optional feature flags (only if true)
             if is_free:
-                base["free"] = True
+                ovpn_server["free"] = True
             if is_streaming:
-                base["stream"] = True
+                ovpn_server["stream"] = True
             if is_secure_core:
-                base["secure_core"] = True
+                ovpn_server["secure_core"] = True
             if is_tor:
-                base["tor"] = True
+                ovpn_server["tor"] = True
             if is_p2p:
-                base["port_forward"] = True
+                ovpn_server["port_forward"] = True
+            ovpn_server["ips"] = [entry_ip]
+            servers.append(ovpn_server)
             
-            base["ips"] = [entry_ip]
-            
-            # Create Wireguard entry (if key present)
+            # Create Wireguard entry (if key present, ordered by Server struct definition)
+            # Only include feature flags when true
             wg_key = physical.get("X25519PublicKey")
             if wg_key:
                 wg_server = {
                     "vpn": "wireguard",
-                    **base,
+                    "country": country,
+                    "city": logical.get("City") or "",
+                    "server_name": logical["Name"],
+                    "hostname": physical["Domain"],
                     "wgpubkey": wg_key,
                 }
-                # Note: Wireguard does NOT have tcp/udp properties
+                if is_free:
+                    wg_server["free"] = True
+                if is_streaming:
+                    wg_server["stream"] = True
+                if is_secure_core:
+                    wg_server["secure_core"] = True
+                if is_tor:
+                    wg_server["tor"] = True
+                if is_p2p:
+                    wg_server["port_forward"] = True
+                wg_server["ips"] = [entry_ip]
                 servers.append(wg_server)
-            
-            # Create OpenVPN entry
-            ovpn_server = {
-                "vpn": "openvpn",
-                **base,
-                "tcp": True,
-                "udp": True,
-            }
-            servers.append(ovpn_server)
 
     # Print statistics
     print(f"\nTransformation statistics:", file=sys.stderr)
