@@ -15,6 +15,7 @@ services:
       TOR: include # OPTIONAL: Filter TOR servers: include (default), exclude, or only
       FREE_TIER: include # OPTIONAL: Filter free tier servers: include (default), exclude, or only
       REPLACE_GLUETUN_SERVERS_JSON: false # OPTIONAL: Replace servers.json with servers-proton.json. Defaults to false if not set.
+      WEB_HOST: 0.0.0.0 # OPTIONAL: Dashboard bind address. Defaults to 127.0.0.1 (localhost-only). Use 0.0.0.0 to expose publicly.
       WEB_PORT: 8080 # OPTIONAL: Port for the web dashboard. Defaults to 8080 if not set.
       IP6: exclude # OPTIONAL: IPv6 behavior: exclude (default), include, or only
       DEBUG: true # OPTIONAL: Enable debug logging set to true.  Defaults to false if not set. 

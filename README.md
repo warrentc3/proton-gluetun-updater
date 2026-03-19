@@ -11,6 +11,7 @@ docker run -d \
   -e PROTON_USERNAME=user \
   -e PROTON_PASSWORD=pass \
   -e STORAGE_FILEPATH=/gluetun \
+  -e WEB_HOST=0.0.0.0 \
   -v /path/to/gluetun:/gluetun \
   -p 8080:8080 \
   ghcr.io/warrentc3/proton-gluetun-updater:latest
@@ -36,6 +37,7 @@ Edit the compose file to set your credentials and paths.
 | `TOR`              | No       | Filter TOR servers: `include` (default), `exclude`, or `only`                                         |
 | `FREE_TIER`        | No       | Filter free tier servers: `include` (default), `exclude`, or `only`                                   |
 | `REPLACE_GLUETUN_SERVERS_JSON` | No | Replace `servers.json` with `servers-proton.json` (`1`/`true`/`yes` or `0`/`false`/`no`, default: `false`) |
+| `WEB_HOST`         | No       | Web dashboard bind address (default: `127.0.0.1` for localhost-only access; use `0.0.0.0` to expose publicly) |
 | `WEB_PORT`         | No       | Port for the web dashboard (default: `8080`)                                                          |
 | `IP6`              | No       | IPv6 address behavior: `include` (add IPv6 IPs to server entries when available), `exclude` (default, strip IPv6 from output), or `only` (filter to servers with IPv6 and include their IPs). IPv6 data is always fetched from the API. |
 | `DEBUG`            | No       | Save raw API response to debug directory (`1`/`true`/`yes` or `0`/`false`/`no`, default: `false`)     |
@@ -56,7 +58,7 @@ A lightweight web dashboard is always available on `WEB_PORT` (default `8080`). 
 
 **Theme:** A light/dark mode toggle is available in the top-right corner. The preference is saved to `localStorage` and defaults to dark mode.
 
-> **Note:** the dashboard has no authentication. Do not expose it publicly — control access via Docker port binding or a reverse proxy.
+> **Security Note:** The dashboard has no authentication and includes a 2FA submission endpoint. By default it binds to `127.0.0.1` (localhost-only) for safety. To expose it in a Docker container, set `WEB_HOST=0.0.0.0` and control access via Docker port binding (`-p 127.0.0.1:8080:8080`) or a reverse proxy with authentication.
 
 ## Debug Mode
 
