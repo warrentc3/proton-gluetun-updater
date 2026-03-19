@@ -111,6 +111,27 @@ PROTON_USERNAME=user \
 PROTON_PASSWORD=pass \
 INCLUDE_IPV6=true \
 python protonvpn_gluetun_updater.py > servers.json
+
+# Enable debug mode (saves raw API response to /out/debug)
+PROTON_USERNAME=user \
+PROTON_PASSWORD=pass \
+DEBUG=true \
+python protonvpn_gluetun_updater.py > servers.json
+
+# Debug mode with custom directory
+PROTON_USERNAME=user \
+PROTON_PASSWORD=pass \
+DEBUG=true \
+DEBUG_DIR=/tmp/protonvpn-debug \
+python protonvpn_gluetun_updater.py > servers.json
+
+# Combined: IPv6 enabled + debug mode + filtering
+PROTON_USERNAME=user \
+PROTON_PASSWORD=pass \
+INCLUDE_IPV6=true \
+DEBUG=true \
+MAX_LOAD=75 \
+python protonvpn_gluetun_updater.py > servers.json
 ```
 
 ### Docker
@@ -142,6 +163,38 @@ docker run --rm \
   -e PROTON_USERNAME=user \
   -e PROTON_PASSWORD=pass \
   -e INCLUDE_IPV6=true \
+  -e OUTPUT_FILE=/out/servers.json \
+  -v /path/to/output:/out \
+  protonvpn-gluetun-updater
+
+# Enable debug mode (saves to /out/debug)
+docker run --rm \
+  -e PROTON_USERNAME=user \
+  -e PROTON_PASSWORD=pass \
+  -e DEBUG=true \
+  -e OUTPUT_FILE=/out/servers.json \
+  -v /path/to/output:/out \
+  protonvpn-gluetun-updater
+
+# Debug with custom directory
+docker run --rm \
+  -e PROTON_USERNAME=user \
+  -e PROTON_PASSWORD=pass \
+  -e DEBUG=true \
+  -e DEBUG_DIR=/debug \
+  -e OUTPUT_FILE=/out/servers.json \
+  -v /path/to/output:/out \
+  -v /path/to/debug:/debug \
+  protonvpn-gluetun-updater
+
+# Full example: filtering + IPv6 + debug
+docker run --rm \
+  -e PROTON_USERNAME=user \
+  -e PROTON_PASSWORD=pass \
+  -e MAX_LOAD=50 \
+  -e MAX_SERVERS=100 \
+  -e INCLUDE_IPV6=true \
+  -e DEBUG=true \
   -e OUTPUT_FILE=/out/servers.json \
   -v /path/to/output:/out \
   protonvpn-gluetun-updater
@@ -177,6 +230,30 @@ Without any filter, all servers are exported (sorted by score).
 | `MAX_LOAD` | No | Only include servers with load <= this value (0-100) |
 | `MAX_SERVERS` | No | Limit to the N best servers, sorted by score |
 | `INCLUDE_IPV6` | No | Include IPv6 addresses in server entries (`1`/`true`/`yes` or `0`/`false`/`no`, default: `false`) |
+| `DEBUG` | No | Save raw API response to debug directory (`1`/`true`/`yes` or `0`/`false`/`no`, default: `false`) |
+| `DEBUG_DIR` | No | Debug output directory (default: `/out/debug` if `DEBUG=true`) |
+
+## Debug Mode
+
+When `DEBUG=true`, the script saves the raw API response from ProtonVPN before transformation. This is useful for:
+- Troubleshooting transformation issues
+- Analyzing changes in the ProtonVPN API response
+- Preserving historical server data
+
+The debug output is saved as `serverlist.{EPOCHTIME}.tar.gz` in the debug directory. The uncompressed JSON is automatically removed after compression to save space.
+
+Example:
+```bash
+# Save debug output to default location (/out/debug)
+DEBUG=true python protonvpn_gluetun_updater.py > servers.json
+
+# Save debug output to custom location
+DEBUG=true DEBUG_DIR=/data/debug python protonvpn_gluetun_updater.py > servers.json
+```
+
+## Country Mapping
+
+The script uses `countries.json` to map 194 country codes to full country names. This file must be present in the same directory as the script. The mapping is loaded at runtime and provides fallback warnings for unknown country codes.
 
 ## License
 
