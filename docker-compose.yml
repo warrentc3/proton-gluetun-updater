@@ -18,4 +18,4 @@ services:
       MAX_SERVERS:  # OPTIONAL: Limit to the N best servers, sorted by score
       INCLUDE_IPV6: true # OPTIONAL: Include IPv6 addresses set to true.  Defaults to false if not set. 
       DEBUG: true # OPTIONAL: Enable debug logging set to true.  Defaults to false if not set. 
-      DEBUG_DIR": /debug # OPTIONAL: Set this to a directory to store debug logs if DEBUG is enabled.  If debug logging is enabled and this is not set, logs will be saved in a created DEBUG subdirectory under /out.
+      DEBUG_DIR: /debug # OPTIONAL: Set this to a directory to store debug logs if DEBUG is enabled.  If debug logging is enabled and this is not set, logs will be saved in a created DEBUG subdirectory under /out.
