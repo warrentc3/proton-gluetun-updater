@@ -24,21 +24,30 @@ tasks:
     summary: |
       Build then run the protonvpn-gluetun-updater container.
 
-      The container receives STORAGE_FILEPATH and MAX_LOAD as environment
-      variables. STORAGE_FILEPATH is mounted as a volume so the container
-      can write the servers-proton.json file.
+      The container receives STORAGE_FILEPATH and filter environment
+      variables (IP6, SECURE_CORE, TOR, FREE_TIER). STORAGE_FILEPATH
+      is mounted as a volume so the container can write the
+      servers-proton.json file.
+
+      Filter defaults: IP6=exclude, SECURE_CORE=include, TOR=include, FREE_TIER=include
     deps:
       - build
     env:
       STORAGE_FILEPATH: /mnt/nas/k8s/volumes/gluetun
-      MAX_LOAD: "50"
+      IP6: exclude
+      SECURE_CORE: include
+      TOR: include
+      FREE_TIER: include
     preconditions:
       - sh: test -d $STORAGE_FILEPATH
         msg: "Storage directory does not exist: $STORAGE_FILEPATH"
     cmds:
       - docker run --rm -it
         -e STORAGE_FILEPATH
-        -e MAX_LOAD
+        -e IP6
+        -e SECURE_CORE
+        -e TOR
+        -e FREE_TIER
         -e PROTON_USERNAME
         -v $STORAGE_FILEPATH:$STORAGE_FILEPATH
         {{.IMAGE_NAME}}

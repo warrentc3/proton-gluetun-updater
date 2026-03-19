@@ -23,6 +23,7 @@ Environment variables:
     TOR               Filter TOR servers: include (default), exclude, or only
     FREE_TIER         Filter free tier servers: include (default), exclude, or only
     REPLACE_GLUETUN_SERVERS_JSON  Replace servers.json with servers-proton.json (1/true/yes or 0/false/no, default: false)
+    WEB_HOST          Web dashboard bind address (default: 127.0.0.1 for localhost-only; use 0.0.0.0 to expose publicly)
     WEB_PORT          Web dashboard port (default: 8080)
     DEBUG             Save raw API response to debug directory (1/true/yes or 0/false/no, default: false)
     DEBUG_DIR         Debug output directory (default: STORAGE_FILEPATH/debug when DEBUG=true and DEBUG_DIR is unset)
@@ -140,6 +141,13 @@ class _Status:
     last_error: str | None = None
     run_count: int = 0
     last_stats: dict | None = None
+    # Configuration parameters
+    config_ip6: str = "exclude"
+    config_secure_core: str = "include"
+    config_tor: str = "include"
+    config_free_tier: str = "include"
+    config_replace_json: bool = False
+    config_debug: bool = False
 
 
 class _TwoFABroker:
@@ -153,7 +161,6 @@ class _TwoFABroker:
     async def wait_for_code(self) -> str:
         """Block until a code is submitted via the web form."""
         self.waiting = True
-        self.message = ""
         try:
             return await self._queue.get()
         finally:
@@ -163,6 +170,7 @@ class _TwoFABroker:
         """Called from the HTTP handler. Returns False if not currently waiting."""
         if not self.waiting or self._queue.full():
             return False
+        self.message = ""  # Clear error message when user submits a new code
         self._queue.put_nowait(code)
         return True
 
@@ -238,6 +246,9 @@ _HTML_PAGE = """\
     .stats-tbl .match{color:#86efac}
     .stats-tbl .diff{color:#fca5a5}
     .stats-notes{margin-top:.6rem;font-size:.72rem;color:#64748b}
+    .filter-grid{display:grid;grid-template-columns:1fr 1fr;gap:.6rem 1.5rem;margin-top:.2rem}
+    .filter-item label{display:block;font-size:.68rem;color:#64748b;text-transform:uppercase;letter-spacing:.08em;margin-bottom:.15rem}
+    .filter-item .fval{font-size:.8rem;font-family:monospace;color:#e2e8f0}
     footer{font-size:.7rem;color:#334155;margin-top:1.5rem}
     #theme-btn{position:fixed;top:.9rem;right:1rem;background:transparent;border:1px solid #2d3348;
       border-radius:6px;color:#64748b;font-size:1.05rem;cursor:pointer;padding:.28rem .6rem;
@@ -258,6 +269,8 @@ _HTML_PAGE = """\
     body.light .stats-tbl th{color:#475569;border-bottom-color:#cbd5e1}
     body.light .stats-tbl td{color:#1e293b;border-bottom-color:#e2e8f0}
     body.light .stats-notes{color:#475569}
+    body.light .filter-item label{color:#475569}
+    body.light .filter-item .fval{color:#1e293b}
     body.light #theme-btn{border-color:#cbd5e1;color:#475569}
     body.light #theme-btn:hover{border-color:#94a3b8;color:#1e293b}
     body.light footer{color:#94a3b8}
@@ -277,6 +290,17 @@ _HTML_PAGE = """\
       <div class="stat"><label>Servers Written</label><span class="val" id="server_count">&#x2014;</span></div>
     </div>
     <div id="err" class="err" style="display:none"></div>
+  </div>
+  <div class="card">
+    <div style="font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:#64748b;margin-bottom:.8rem">Filter Configuration</div>
+    <div class="filter-grid">
+      <div class="filter-item"><label>IP6</label><span class="fval" id="cfg_ip6">&#x2014;</span></div>
+      <div class="filter-item"><label>Secure Core</label><span class="fval" id="cfg_secure_core">&#x2014;</span></div>
+      <div class="filter-item"><label>TOR</label><span class="fval" id="cfg_tor">&#x2014;</span></div>
+      <div class="filter-item"><label>Free Tier</label><span class="fval" id="cfg_free_tier">&#x2014;</span></div>
+      <div class="filter-item"><label>Replace JSON</label><span class="fval" id="cfg_replace_json">&#x2014;</span></div>
+      <div class="filter-item"><label>Debug</label><span class="fval" id="cfg_debug">&#x2014;</span></div>
+    </div>
   </div>
   <div class="card" id="stats_card" style="display:none">
     <div style="font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:#64748b;margin-bottom:.8rem">Last Run Statistics</div>
@@ -343,6 +367,14 @@ _HTML_PAGE = """\
         var tm=document.getElementById('tfa_msg');
         if(d.twofa_message){tm.style.display='block';tm.textContent=d.twofa_message;}
         else{tm.style.display='none';}
+        if(d.config){
+          set('cfg_ip6',d.config.ip6);
+          set('cfg_secure_core',d.config.secure_core);
+          set('cfg_tor',d.config.tor);
+          set('cfg_free_tier',d.config.free_tier);
+          set('cfg_replace_json',d.config.replace_json?'true':'false');
+          set('cfg_debug',d.config.debug?'true':'false');
+        }
         set('ts',new Date().toLocaleTimeString());
       }catch(e){}
     }
@@ -435,6 +467,14 @@ async def _web_handler(
                 "waiting_2fa": broker.waiting,
                 "twofa_message": broker.message or None,
                 "stats": runtime.last_stats,
+                "config": {
+                    "ip6": runtime.config_ip6,
+                    "secure_core": runtime.config_secure_core,
+                    "tor": runtime.config_tor,
+                    "free_tier": runtime.config_free_tier,
+                    "replace_json": runtime.config_replace_json,
+                    "debug": runtime.config_debug,
+                },
             })
             _http_respond(writer, "200 OK", "application/json", payload)
 
@@ -463,11 +503,11 @@ async def _web_handler(
             pass
 
 
-async def _start_web_server(port: int, runtime: _Status, broker: _TwoFABroker) -> asyncio.Server:
+async def _start_web_server(host: str, port: int, runtime: _Status, broker: _TwoFABroker) -> asyncio.Server:
     async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         await _web_handler(reader, writer, runtime, broker)
 
-    server = await asyncio.start_server(_handle, "0.0.0.0", port)
+    server = await asyncio.start_server(_handle, host, port)
     addr = server.sockets[0].getsockname()
     print(f"Web dashboard listening on http://{addr[0]}:{addr[1]}", file=sys.stderr)
     return server
@@ -519,6 +559,7 @@ async def _fetch_server_list(
                 totp_code = await broker.wait_for_code()
                 success = await session.async_validate_2fa_code(totp_code)
                 if success:
+                    broker.message = ""  # Clear any previous error message
                     if status is not None:
                         status.state = "running"
                     print("2FA validated via web dashboard.", file=sys.stderr)
@@ -631,12 +672,16 @@ def transform(api_data: dict, ipv6_filter: str = "exclude", secure_core_filter: 
                 stats['skipped_disabled'] += 1
                 continue
             
+            # Skip physical servers without IPv6 when ipv6_filter is "only"
+            entry_ipv6 = physical.get("EntryIPv6")
+            if ipv6_filter == "only" and not entry_ipv6:
+                continue
+            
             entry_ip = physical["EntryIP"]
             
             # Collect all IPs (IPv4 and optionally IPv6)
             ips = [entry_ip]
             if ipv6_filter in ("include", "only"):
-                entry_ipv6 = physical.get("EntryIPv6")
                 if entry_ipv6:
                     ips.append(entry_ipv6)
             
@@ -905,6 +950,9 @@ async def main():
     if debug and not debug_dir:
         debug_dir = os.path.join(storage_path, "debug")
 
+    # Parse WEB_HOST (default 127.0.0.1 for security)
+    web_host = os.environ.get("WEB_HOST", "127.0.0.1")
+
     # Parse WEB_PORT (default 8080)
     web_port_env = os.environ.get("WEB_PORT", "8080")
     try:
@@ -918,9 +966,16 @@ async def main():
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, stop_event.set)
 
-    runtime = _Status()
+    runtime = _Status(
+        config_ip6=ipv6_filter,
+        config_secure_core=secure_core_filter,
+        config_tor=tor_filter,
+        config_free_tier=free_tier_filter,
+        config_replace_json=replace_gluetun_servers_json,
+        config_debug=debug,
+    )
     broker = _TwoFABroker()
-    web_server = await _start_web_server(web_port, runtime, broker)
+    web_server = await _start_web_server(web_host, web_port, runtime, broker)
 
     runtime.state = "authenticating"
     session = await _authenticate(username, password)
