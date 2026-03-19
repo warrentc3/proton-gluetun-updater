@@ -6,7 +6,7 @@ services:
       - /path/to/gluetun:/gluetun  # Mandatory: Set this to your gluetun configuration directory
       - /path/to/debug:/debug # Optional: Set this to a directory to store debug logs if DEBUG is enabled.  When DEBUG=true and DEBUG_DIR is unset, defaults to STORAGE_FILEPATH/debug subdirectory.
     ports:
-      - "8080:8080" # OPTIONAL: Web dashboard port (only active when KEEP_RUNNING=true). Change left side to remap host port. 
+      - "8080:8080" # OPTIONAL: Web dashboard port. Change left side to remap host port.
     environment:
       PROTON_USERNAME: username # MANDATORY: Set this to your Proton account username
       PROTON_PASSWORD: password # MANDATORY: Set this to your Proton account password
