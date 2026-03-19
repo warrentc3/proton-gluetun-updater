@@ -18,9 +18,7 @@ Environment variables:
     PROTON_USERNAME   Proton account username
     PROTON_PASSWORD   Proton account password
     STORAGE_FILEPATH  Storage directory path (required, output file: servers-proton.json)
-    MAX_LOAD          Max server load percentage to include (0-100, default: no filter)
-    MAX_SERVERS       Limit to the N best servers after sorting and filtering (default: no limit)
-    INCLUDE_IPV6      Retain IPv6 addresses in server entries (1/true/yes or 0/false/no, default: false; IPv6 data is always fetched but stripped from output when false)
+    IP6               IPv6 address behavior: include (add IPv6 IPs when available), exclude (default, strip IPv6 from output), or only (filter to servers with IPv6 and include their IPs). IPv6 data is always fetched from the API.
     SECURE_CORE       Filter secure_core servers: include (default), exclude, or only
     TOR               Filter TOR servers: include (default), exclude, or only
     FREE_TIER         Filter free tier servers: include (default), exclude, or only
@@ -500,9 +498,9 @@ async def _fetch_server_list(
     initial request after password-only authentication).  Subsequent calls
     on the same session skip 2FA because the session token is already valid.
 
-    IPv6 data is always requested from the API regardless of include_ipv6;
-    the include_ipv6 flag is applied during transformation to filter the
-    addresses out of the output when not wanted.
+    IPv6 data is always requested from the API regardless of INCLUDE_IPV6;
+    the ipv6_filter is applied during transformation to include, exclude, or
+    restrict output to servers with IPv6 addresses.
 
     When a broker is provided, 2FA codes are collected via the web form and
     invalid codes prompt a retry instead of exiting.  Without a broker (dev/
@@ -547,7 +545,7 @@ async def _fetch_server_list(
         return await session.async_api_request(LOGICALS_ENDPOINT)
 
 
-def transform(api_data: dict, max_load: int | None = None, max_servers: int | None = None, include_ipv6: bool = False, secure_core_filter: str = "include", tor_filter: str = "include", free_tier_filter: str = "include") -> tuple[dict, dict]:
+def transform(api_data: dict, ipv6_filter: str = "exclude", secure_core_filter: str = "include", tor_filter: str = "include", free_tier_filter: str = "include") -> tuple[dict, dict]:
     """
     Transform ProtonVPN API data to Gluetun format.
     
@@ -557,8 +555,8 @@ def transform(api_data: dict, max_load: int | None = None, max_servers: int | No
     - Only include feature flags when true
     - Fix Wireguard: no tcp/udp properties
     - Deduplicate physical servers for non-secure_core
-    - Optional IPv6 address inclusion
-    - Filtering by secure_core, TOR, and free tier (include/exclude/only)
+    - IPv6 filter (include/exclude/only)
+    - Filtering by secure_core, TOR, free tier, and IPv6 (include/exclude/only)
     """
     # Compute raw totals from API data before any filtering
     _all = api_data["LogicalServers"]
@@ -571,7 +569,7 @@ def transform(api_data: dict, max_load: int | None = None, max_servers: int | No
     total_p2p = sum(1 for s in _all if s.get("Features", 0) & P2P)
     total_streaming = sum(1 for s in _all if s.get("Features", 0) & STREAMING)
 
-    # Sort logical servers: secure_core first, then tor, then by country, city, and score
+    # Sort logical servers: secure_core first, then tor, then by country, city, and load
     logicals = sorted(
         _all,
         key=lambda s: (
@@ -579,12 +577,9 @@ def transform(api_data: dict, max_load: int | None = None, max_servers: int | No
             not bool(s.get("Features", 0) & TOR),           # then tor
             parse_country_from_name(s["Name"], bool(s.get("Features", 0) & SECURE_CORE)),  # country alphabetically
             s.get("City", ""),                              # city alphabetically
-            s.get("Score", float("inf"))                    # score ascending (lower is better)
+            s.get("Load", 100)                              # load ascending (lower is better)
         )
     )
-
-    if max_load is not None:
-        logicals = [s for s in logicals if s.get("Load", 100) <= max_load]
 
     # Apply secure_core filter
     if secure_core_filter == "only":
@@ -604,8 +599,9 @@ def transform(api_data: dict, max_load: int | None = None, max_servers: int | No
     elif free_tier_filter == "exclude":
         logicals = [s for s in logicals if s.get("Tier", 1) != 0]
 
-    if max_servers is not None:
-        logicals = logicals[:max_servers]
+    # Apply IPv6 filter
+    if ipv6_filter == "only":
+        logicals = [s for s in logicals if any(p.get("EntryIPv6") for p in s["Servers"])]
 
     servers = []
     seen_ips = {}  # Track IPs for non-secure_core deduplication
@@ -639,7 +635,7 @@ def transform(api_data: dict, max_load: int | None = None, max_servers: int | No
             
             # Collect all IPs (IPv4 and optionally IPv6)
             ips = [entry_ip]
-            if include_ipv6:
+            if ipv6_filter in ("include", "only"):
                 entry_ipv6 = physical.get("EntryIPv6")
                 if entry_ipv6:
                     ips.append(entry_ipv6)
@@ -769,9 +765,7 @@ def _atomic_write(path: str, content: str) -> None:
 async def run_update(
     session: Session,
     storage_path,
-    max_load,
-    max_servers,
-    include_ipv6,
+    ipv6_filter,
     secure_core_filter,
     tor_filter,
     free_tier_filter,
@@ -814,7 +808,7 @@ async def run_update(
         json_filepath.unlink()
         print(f"Debug: Removed uncompressed {json_filepath}", file=sys.stderr)
     
-    result, transform_stats = transform(api_data, max_load=max_load, max_servers=max_servers, include_ipv6=include_ipv6, secure_core_filter=secure_core_filter, tor_filter=tor_filter, free_tier_filter=free_tier_filter)
+    result, transform_stats = transform(api_data, ipv6_filter=ipv6_filter, secure_core_filter=secure_core_filter, tor_filter=tor_filter, free_tier_filter=free_tier_filter)
 
     output = json.dumps(result, indent=2)
     count = len(result["protonvpn"]["servers"])
@@ -823,16 +817,14 @@ async def run_update(
     output_file = os.path.join(storage_path, "servers-proton.json")
     
     filters = []
-    if max_load is not None:
-        filters.append(f"max_load={max_load}%")
-    if max_servers is not None:
-        filters.append(f"max_servers={max_servers}")
     if secure_core_filter != "include":
         filters.append(f"secure_core={secure_core_filter}")
     if tor_filter != "include":
         filters.append(f"tor={tor_filter}")
     if free_tier_filter != "include":
         filters.append(f"free_tier={free_tier_filter}")
+    if ipv6_filter != "exclude":
+        filters.append(f"ipv6={ipv6_filter}")
     filter_info = f" ({', '.join(filters)})" if filters else ""
 
     # Create output directory if it doesn't exist
@@ -856,15 +848,11 @@ async def run_update(
 async def main():
     username, password = get_credentials()
 
-    max_load_env = os.environ.get("MAX_LOAD")
-    max_load = int(max_load_env) if max_load_env else None
-
-    max_servers_env = os.environ.get("MAX_SERVERS")
-    max_servers = int(max_servers_env) if max_servers_env else None
-
-    # Parse INCLUDE_IPV6 (default: false)
-    include_ipv6_env = os.environ.get("INCLUDE_IPV6", "false").lower()
-    include_ipv6 = include_ipv6_env in ("1", "true", "yes")
+    # Parse IP6 filter (default: exclude)
+    ipv6_filter = os.environ.get("IP6", "exclude").lower()
+    if ipv6_filter not in ("include", "exclude", "only"):
+        print(f"Warning: Invalid IP6 value '{ipv6_filter}'. Using 'exclude'.", file=sys.stderr)
+        ipv6_filter = "exclude"
 
     # Parse SECURE_CORE filter (default: include)
     secure_core_filter = os.environ.get("SECURE_CORE", "include").lower()
@@ -926,7 +914,7 @@ async def main():
         while not stop_event.is_set():
             try:
                 await run_update(
-                    session, storage_path, max_load, max_servers, include_ipv6,
+                    session, storage_path, ipv6_filter,
                     secure_core_filter, tor_filter, free_tier_filter,
                     replace_gluetun_servers_json, debug, debug_dir,
                     status=runtime, broker=broker,
