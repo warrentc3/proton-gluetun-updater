@@ -38,6 +38,8 @@ Edit the compose file to set your credentials and paths.
 | `SECURE_CORE`      | No       | Filter Secure Core servers: `include` (default), `exclude`, or `only`                                 |
 | `TOR`              | No       | Filter TOR servers: `include` (default), `exclude`, or `only`                                         |
 | `FREE_TIER`        | No       | Filter free tier servers: `include` (default), `exclude`, or `only`                                   |
+| `REPLACE_GLUETUN_SERVERS_JSON` | No | Replace `servers.json` with `servers-proton.json` (`1`/`true`/`yes` or `0`/`false`/`no`, default: `false`) |
+| `KEEP_RUNNING`     | No       | Keep container running and execute at random intervals (12-36 hours) (`1`/`true`/`yes` or `0`/`false`/`no`, default: `false`) |
 | `INCLUDE_IPV6`     | No       | Include IPv6 addresses in server entries (`1`/`true`/`yes` or `0`/`false`/`no`, default: `false`)     |
 | `DEBUG`            | No       | Save raw API response to debug directory (`1`/`true`/`yes` or `0`/`false`/`no`, default: `false`)     |
 | `DEBUG_DIR`        | No       | Debug output directory (default: `STORAGE_FILEPATH/debug` when `DEBUG=true` and `DEBUG_DIR` is unset) |

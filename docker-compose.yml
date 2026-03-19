@@ -15,6 +15,8 @@ services:
       SECURE_CORE: include # OPTIONAL: Filter Secure Core servers: include (default), exclude, or only
       TOR: include # OPTIONAL: Filter TOR servers: include (default), exclude, or only
       FREE_TIER: include # OPTIONAL: Filter free tier servers: include (default), exclude, or only
+      REPLACE_GLUETUN_SERVERS_JSON: false # OPTIONAL: Replace servers.json with servers-proton.json. Defaults to false if not set.
+      KEEP_RUNNING: false # OPTIONAL: Keep container running and execute at random intervals (12-36 hours). Defaults to false if not set.
       INCLUDE_IPV6: true # OPTIONAL: Include IPv6 addresses set to true.  Defaults to false if not set. 
       DEBUG: true # OPTIONAL: Enable debug logging set to true.  Defaults to false if not set. 
       DEBUG_DIR: /debug # OPTIONAL: Set this to a directory to store debug logs if DEBUG is enabled.  When DEBUG=true and DEBUG_DIR is unset, defaults to STORAGE_FILEPATH/debug subdirectory.
