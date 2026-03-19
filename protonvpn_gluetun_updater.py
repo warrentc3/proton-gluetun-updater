@@ -14,20 +14,19 @@ IMPROVEMENTS over original version:
 - Physical server deduplication for non-secure_core servers
 - Better statistics and verbose output
 
-Environment variables (or interactive prompt):
+Environment variables:
     PROTON_USERNAME   Proton account username
     PROTON_PASSWORD   Proton account password
     PROTON_2FA        TOTP code (optional, only if 2FA is enabled)
-    OUTPUT_FILE       Output file path (default: stdout)
+    STORAGE_FILEPATH  Storage directory path (required, output file: servers-proton.json)
     MAX_LOAD          Max server load percentage to include (0-100, default: no filter)
     MAX_SERVERS       Max number of servers to export, sorted by load (default: no limit)
     INCLUDE_IPV6      Include IPv6 addresses in server entries (1/true/yes or 0/false/no, default: false)
     DEBUG             Save raw API response to debug directory (1/true/yes or 0/false/no, default: false)
-    DEBUG_DIR         Debug output directory (default: /out/debug if DEBUG=true)
+    DEBUG_DIR         Debug output directory (default: STORAGE_FILEPATH/debug when DEBUG=true and DEBUG_DIR is unset)
 """
 import asyncio
 import getpass
-import gzip
 import json
 import os
 import re
@@ -41,7 +40,7 @@ from proton.session.exceptions import ProtonAPI2FANeeded
 
 APP_VERSION = "linux-vpn-cli@4.15.2"
 USER_AGENT = "ProtonVPN/4.15.2 (Linux)"
-LOGICALS_ENDPOINT = "/vpn/v1/logicals?WithIpV6=1&SecureCoreFilter=all"
+LOGICALS_ENDPOINT_BASE = "/vpn/v1/logicals?SecureCoreFilter=all"
 
 # Feature bitmask (from proton.vpn.session.servers.types.ServerFeatureEnum)
 SECURE_CORE = 1 << 0  # 1
@@ -118,7 +117,7 @@ def get_credentials() -> tuple[str, str]:
     return username, password
 
 
-async def fetch_server_list(username: str, password: str) -> dict:
+async def fetch_server_list(username: str, password: str, include_ipv6: bool = False) -> dict:
     session = Session(appversion=APP_VERSION, user_agent=USER_AGENT)
 
     print("Authenticating...", file=sys.stderr)
@@ -127,9 +126,14 @@ async def fetch_server_list(username: str, password: str) -> dict:
         print("Error: authentication failed.", file=sys.stderr)
         sys.exit(1)
 
+    # Build endpoint with conditional IPv6 parameter
+    endpoint = LOGICALS_ENDPOINT_BASE
+    if include_ipv6:
+        endpoint += "&WithIpV6=1"
+
     try:
         print("Fetching server list...", file=sys.stderr)
-        response = await session.async_api_request(LOGICALS_ENDPOINT)
+        response = await session.async_api_request(endpoint)
     except ProtonAPI2FANeeded:
         totp_code = os.environ.get("PROTON_2FA")
         if not totp_code:
@@ -145,13 +149,13 @@ async def fetch_server_list(username: str, password: str) -> dict:
             sys.exit(1)
 
         print("Fetching server list...", file=sys.stderr)
-        response = await session.async_api_request(LOGICALS_ENDPOINT)
+        response = await session.async_api_request(endpoint)
 
     await session.async_logout()
     return response
 
 
-def transform(api_data: dict, max_load: int | None = None, max_servers: int | None = None, include_ipv6: bool = True) -> dict:
+def transform(api_data: dict, max_load: int | None = None, max_servers: int | None = None, include_ipv6: bool = False) -> dict:
     """
     Transform ProtonVPN API data to Gluetun format.
     
@@ -311,16 +315,22 @@ async def main():
     include_ipv6_env = os.environ.get("INCLUDE_IPV6", "false").lower()
     include_ipv6 = include_ipv6_env in ("1", "true", "yes")
 
+    # Parse STORAGE_FILEPATH (directory for output file) - REQUIRED
+    storage_path = os.environ.get("STORAGE_FILEPATH")
+    if not storage_path:
+        print("Error: STORAGE_FILEPATH environment variable is required.", file=sys.stderr)
+        sys.exit(1)
+
     # Parse DEBUG (default: false)
     debug_env = os.environ.get("DEBUG", "false").lower()
     debug = debug_env in ("1", "true", "yes")
 
-    # Parse DEBUG_DIR (default: /out/debug if DEBUG=true)
+    # Parse DEBUG_DIR (default: STORAGE_FILEPATH/debug)
     debug_dir = os.environ.get("DEBUG_DIR")
     if debug and not debug_dir:
-        debug_dir = "/out/debug"
+        debug_dir = os.path.join(storage_path, "debug")
 
-    api_data = await fetch_server_list(username, password)
+    api_data = await fetch_server_list(username, password, include_ipv6)
     
     # Save debug output if DEBUG=true
     if debug:
@@ -353,7 +363,9 @@ async def main():
     output = json.dumps(result, indent=2)
     count = len(result["protonvpn"]["servers"])
 
-    output_file = os.environ.get("OUTPUT_FILE")
+    # Build output file path from storage directory
+    output_file = os.path.join(storage_path, "servers-proton.json")
+    
     filters = []
     if max_load is not None:
         filters.append(f"max_load={max_load}%")
@@ -361,13 +373,11 @@ async def main():
         filters.append(f"max_servers={max_servers}")
     filter_info = f" ({', '.join(filters)})" if filters else ""
 
-    if output_file:
-        with open(output_file, "w") as f:
-            f.write(output)
-        print(f"\n{count} servers written to {output_file} (from {total} logicals{filter_info})", file=sys.stderr)
-    else:
-        print(output)
-        print(f"\n# {count} servers exported (from {total} logicals{filter_info})", file=sys.stderr)
+    # Create output directory if it doesn't exist
+    os.makedirs(os.path.dirname(output_file), exist_ok=True)
+    with open(output_file, "w") as f:
+        f.write(output)
+    print(f"\n{count} servers written to {output_file} (from {total} logicals{filter_info})", file=sys.stderr)
 
 
 if __name__ == "__main__":

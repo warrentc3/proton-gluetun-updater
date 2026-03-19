@@ -1,21 +1,21 @@
 services:
   gtupdate:
-    ## build from source
-    build: https://gitlab.com/warrentc3/protonvpn-gluetun-updater.git#feature/improved-transformation
-    pull_policy: always
     ## use repository image (latest):
-    ## image: ghcr.io/warrentc3/protonvpn-gluetun-updater:latest
+    image: ghcr.io/warrentc3/proton-gluetun-updater:latest
+    pull_policy: always
+    ## build from source (local):
+    ## build: .
     container_name: protonvpn-gluetun-updater
     volumes:
-      - /path/to/output:/out  # Mandatory: Set this to the desired output directory, soon will be able to merge output with gluetun config directory.
-      - /path/to/debug:/debug # Optional: Set this to a directory to store debug logs if DEBUG is enabled.  If debug logging is enabled and this is not set, logs will be saved in a created DEBUG subdirectory under /out. 
+      - /path/to/gluetun:/gluetun  # Mandatory: Set this to your gluetun configuration directory
+      - /path/to/debug:/debug # Optional: Set this to a directory to store debug logs if DEBUG is enabled.  When DEBUG=true and DEBUG_DIR is unset, defaults to STORAGE_FILEPATH/debug subdirectory. 
     environment:
       PROTON_USERNAME: username # MANDATORY: Set this to your Proton account username
       PROTON_PASSWORD: password # MANDATORY: Set this to your Proton account password
       PROTON_2FA: "" # OPTIONAL: Set this to your TOTP code if 2FA is enabled on your account
-      OUTPUT_FILE: /out/servers.json # OPTIONAL: Set this to the desired output file
+      STORAGE_FILEPATH: /gluetun # MANDATORY: Storage directory path (output file: servers-proton.json)
       MAX_LOAD:  # OPTIONAL: Only include servers with load <= this value (0-100)
       MAX_SERVERS:  # OPTIONAL: Limit to the N best servers, sorted by score
       INCLUDE_IPV6: true # OPTIONAL: Include IPv6 addresses set to true.  Defaults to false if not set. 
       DEBUG: true # OPTIONAL: Enable debug logging set to true.  Defaults to false if not set. 
-      DEBUG_DIR: /debug # OPTIONAL: Set this to a directory to store debug logs if DEBUG is enabled.  If debug logging is enabled and this is not set, logs will be saved in a created DEBUG subdirectory under /out.
+      DEBUG_DIR: /debug # OPTIONAL: Set this to a directory to store debug logs if DEBUG is enabled.  When DEBUG=true and DEBUG_DIR is unset, defaults to STORAGE_FILEPATH/debug subdirectory.
