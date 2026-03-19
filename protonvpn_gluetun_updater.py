@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Fetch the Proton VPN server list and export it in Gluetun custom
-provider format (servers.json).
+provider format (servers-proton.json).
 
 Authenticates directly against the Proton API using SRP.
 
@@ -27,10 +27,12 @@ Environment variables:
     FREE_TIER         Filter free tier servers: include (default), exclude, or only
     REPLACE_GLUETUN_SERVERS_JSON  Replace servers.json with servers-proton.json (1/true/yes or 0/false/no, default: false)
     KEEP_RUNNING      Keep container running and execute at random intervals (1/true/yes or 0/false/no, default: false)
+    WEB_PORT          Web dashboard port when KEEP_RUNNING=true (default: 8080; not started in single-run mode)
     DEBUG             Save raw API response to debug directory (1/true/yes or 0/false/no, default: false)
     DEBUG_DIR         Debug output directory (default: STORAGE_FILEPATH/debug when DEBUG=true and DEBUG_DIR is unset)
 """
 import asyncio
+import dataclasses
 import getpass
 import json
 import os
@@ -39,8 +41,10 @@ import re
 import signal
 import sys
 import tarfile
+import tempfile
 import time
 from pathlib import Path
+from urllib.parse import parse_qs
 
 from proton.session import Session
 from proton.session.exceptions import ProtonAPI2FANeeded
@@ -86,14 +90,15 @@ def country_name(code: str) -> str:
 
 def parse_country_from_name(server_name: str, is_secure_core: bool) -> str:
     """
-    Parse country code from server name.
-    
-    Critical for secure_core servers where ExitCountry indicates the exit point,
-    but the actual server location is encoded in the name.
-    
+    Parse the exit country code from a server name and return the full country name.
+
+    For Secure Core servers, the name format is CC-CC#N (entry-exit), where the
+    first code is the hosting/entry country and the second is the exit country.
+    The exit country is returned so Gluetun routes traffic correctly.
+
     Examples:
-        Normal: "US-NY#1" -> "US" -> "United States"
-        Secure Core: "IS-US#1" -> "US" -> "United States" (exit through US, hosted in Iceland)
+        Normal:       "US-NY#1" -> "US" -> "United States"
+        Secure Core:  "IS-US#1" -> "US" -> "United States" (entry in Iceland, exit via US)
     """
     if is_secure_core:
         # Secure core: CC-CC#N format, take second CC (exit country)
@@ -124,42 +129,327 @@ def get_credentials() -> tuple[str, str]:
     return username, password
 
 
-async def fetch_server_list(username: str, password: str, include_ipv6: bool = False) -> dict:
-    session = Session(appversion=APP_VERSION, user_agent=USER_AGENT)
+# ---------------------------------------------------------------------------
+# Runtime state, 2FA broker, and web dashboard
+# ---------------------------------------------------------------------------
 
+@dataclasses.dataclass
+class _Status:
+    """Mutable runtime state surfaced on the web dashboard."""
+    start_time: float = dataclasses.field(default_factory=time.time)
+    state: str = "starting"     # starting|authenticating|running|sleeping|waiting_2fa|error|shutting_down
+    last_run_time: float | None = None
+    next_run_time: float | None = None
+    last_server_count: int | None = None
+    last_error: str | None = None
+    run_count: int = 0
+
+
+class _TwoFABroker:
+    """Bridges the web 2FA form submission to the asyncio authentication flow."""
+
+    def __init__(self) -> None:
+        self._queue: asyncio.Queue[str] = asyncio.Queue(maxsize=1)
+        self.waiting: bool = False
+        self.message: str = ""  # feedback shown on the web form after a bad code
+
+    async def wait_for_code(self) -> str:
+        """Block until a code is submitted via the web form."""
+        self.waiting = True
+        self.message = ""
+        try:
+            return await self._queue.get()
+        finally:
+            self.waiting = False
+
+    def submit_code(self, code: str) -> bool:
+        """Called from the HTTP handler. Returns False if not currently waiting."""
+        if not self.waiting or self._queue.full():
+            return False
+        self._queue.put_nowait(code)
+        return True
+
+
+def _fmt_ts(ts: float | None) -> str | None:
+    if ts is None:
+        return None
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
+
+
+def _fmt_uptime(start: float) -> str:
+    secs = int(time.time() - start)
+    h, rem = divmod(secs, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}h {m}m {s}s"
+
+
+_HTML_PAGE = """\
+<!DOCTYPE html><html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>ProtonVPN Gluetun Updater</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{background:#0f1117;color:#e2e8f0;font-family:system-ui,sans-serif;min-height:100vh;
+         display:flex;flex-direction:column;align-items:center;padding:2rem 1rem}
+    h1{font-size:1.4rem;font-weight:700;margin-bottom:.2rem}
+    .sub{font-size:.8rem;color:#64748b;margin-bottom:1.5rem}
+    .card{background:#1e2130;border:1px solid #2d3348;border-radius:10px;
+          padding:1.5rem;width:100%;max-width:540px;margin-bottom:1rem}
+    .badge{display:inline-block;padding:.2rem .75rem;border-radius:999px;font-size:.72rem;
+           font-weight:700;text-transform:uppercase;letter-spacing:.06em;margin-bottom:1.2rem}
+    .s-starting,.s-shutting_down{background:#1e293b;color:#94a3b8}
+    .s-authenticating{background:#1e293b;color:#93c5fd;animation:pulse 1.2s ease-in-out infinite}
+    .s-running{background:#14532d;color:#86efac;animation:pulse 1.2s ease-in-out infinite}
+    .s-sleeping{background:#1e3a5f;color:#7dd3fc}
+    .s-waiting_2fa{background:#451a03;color:#fdba74;animation:pulse 1s ease-in-out infinite}
+    .s-error{background:#450a0a;color:#fca5a5}
+    @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:.8rem 2rem}
+    .stat label{display:block;font-size:.68rem;color:#64748b;text-transform:uppercase;
+                letter-spacing:.08em;margin-bottom:.2rem}
+    .stat .val{font-size:.88rem;font-family:monospace;color:#e2e8f0}
+    .err{margin-top:1rem;background:#1c0a0a;border:1px solid #7f1d1d;border-radius:6px;
+         padding:.75rem;font-size:.78rem;color:#fca5a5;font-family:monospace;word-break:break-all}
+    .tfa{background:#1e2130;border:1px solid #92400e;border-radius:10px;
+         padding:1.5rem;width:100%;max-width:540px}
+    .tfa h2{font-size:1rem;color:#fdba74;margin-bottom:.4rem}
+    .tfa p{font-size:.8rem;color:#94a3b8;margin-bottom:.8rem}
+    .tfa-msg{font-size:.78rem;color:#fca5a5;margin-bottom:.6rem}
+    .tfa-form{display:flex;gap:.5rem}
+    .tfa-in{flex:1;background:#0f1117;border:1px solid #475569;border-radius:6px;
+            padding:.5rem .75rem;color:#e2e8f0;font-size:1.1rem;letter-spacing:.2em;
+            text-align:center;font-family:monospace;outline:none}
+    .tfa-in:focus{border-color:#f97316}
+    .tfa-btn{background:#f97316;color:#fff;border:none;border-radius:6px;
+             padding:.5rem 1.2rem;font-size:.9rem;font-weight:600;cursor:pointer}
+    .tfa-btn:hover{background:#ea580c}
+    footer{font-size:.7rem;color:#334155;margin-top:1.5rem}
+  </style>
+</head>
+<body>
+  <h1>ProtonVPN Gluetun Updater</h1>
+  <p class="sub">Server list refresh service</p>
+  <div class="card">
+    <div id="badge" class="badge s-starting">starting</div>
+    <div class="grid">
+      <div class="stat"><label>Uptime</label><span class="val" id="uptime">&#x2014;</span></div>
+      <div class="stat"><label>Total Runs</label><span class="val" id="run_count">&#x2014;</span></div>
+      <div class="stat"><label>Last Run</label><span class="val" id="last_run">&#x2014;</span></div>
+      <div class="stat"><label>Next Run</label><span class="val" id="next_run">&#x2014;</span></div>
+      <div class="stat"><label>Servers Written</label><span class="val" id="server_count">&#x2014;</span></div>
+    </div>
+    <div id="err" class="err" style="display:none"></div>
+  </div>
+  <div class="tfa" id="tfa_card" style="display:none">
+    <h2>&#x1F511; 2FA Required</h2>
+    <p>Enter your 6-digit authenticator code to continue.</p>
+    <div id="tfa_msg" class="tfa-msg" style="display:none"></div>
+    <form class="tfa-form" method="POST" action="/2fa">
+      <input class="tfa-in" type="text" name="code" maxlength="8" inputmode="numeric"
+             pattern="[0-9 ]*" placeholder="000000" autocomplete="one-time-code" autofocus>
+      <button class="tfa-btn" type="submit">Submit</button>
+    </form>
+  </div>
+  <footer>Auto-refreshes every 10 s &mdash; last: <span id="ts">never</span></footer>
+  <script>
+    function set(id,v){var e=document.getElementById(id);if(e)e.textContent=v!=null?v:'\u2014';}
+    async function refresh(){
+      try{
+        var r=await fetch('/status');if(!r.ok)return;
+        var d=await r.json();
+        var b=document.getElementById('badge');
+        b.textContent=d.state.replace(/_/g,' ');
+        b.className='badge s-'+d.state;
+        set('uptime',d.uptime);set('run_count',d.run_count);
+        set('last_run',d.last_run);set('next_run',d.next_run);
+        set('server_count',d.server_count);
+        var eb=document.getElementById('err');
+        if(d.last_error){eb.style.display='block';eb.textContent=d.last_error;}
+        else{eb.style.display='none';}
+        document.getElementById('tfa_card').style.display=d.waiting_2fa?'block':'none';
+        var tm=document.getElementById('tfa_msg');
+        if(d.twofa_message){tm.style.display='block';tm.textContent=d.twofa_message;}
+        else{tm.style.display='none';}
+        set('ts',new Date().toLocaleTimeString());
+      }catch(e){}
+    }
+    refresh();setInterval(refresh,10000);
+  </script>
+</body></html>
+"""
+
+
+async def _read_http_request(reader: asyncio.StreamReader):
+    """Parse a minimal HTTP/1.x request. Returns (method, path, headers, body) or None."""
+    try:
+        line = await asyncio.wait_for(reader.readline(), timeout=5)
+        parts = line.decode(errors="replace").split()
+        if len(parts) < 2:
+            return None
+        method, path = parts[0].upper(), parts[1]
+        headers: dict[str, str] = {}
+        while True:
+            hline = await asyncio.wait_for(reader.readline(), timeout=5)
+            if hline in (b"\r\n", b"\n", b""):
+                break
+            if b":" in hline:
+                k, _, v = hline.decode(errors="replace").partition(":")
+                headers[k.strip().lower()] = v.strip()
+        body = b""
+        if "content-length" in headers:
+            length = min(int(headers["content-length"]), 512)  # cap to prevent DoS
+            body = await asyncio.wait_for(reader.readexactly(length), timeout=5)
+        return method, path, headers, body
+    except Exception:
+        return None
+
+
+def _http_respond(writer: asyncio.StreamWriter, status: str, ctype: str, body: str | bytes) -> None:
+    b = body.encode() if isinstance(body, str) else body
+    writer.write(
+        f"HTTP/1.1 {status}\r\nContent-Type: {ctype}\r\nContent-Length: {len(b)}\r\nConnection: close\r\n\r\n".encode()
+        + b
+    )
+
+
+def _http_redirect(writer: asyncio.StreamWriter, location: str) -> None:
+    writer.write(
+        f"HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".encode()
+    )
+
+
+async def _web_handler(
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    runtime: _Status,
+    broker: _TwoFABroker,
+) -> None:
+    try:
+        req = await _read_http_request(reader)
+        if req is None:
+            return
+        method, path, _, body = req
+
+        if method == "GET" and path in ("/", ""):
+            _http_respond(writer, "200 OK", "text/html; charset=utf-8", _HTML_PAGE)
+
+        elif method == "GET" and path == "/status":
+            payload = json.dumps({
+                "state": runtime.state,
+                "uptime": _fmt_uptime(runtime.start_time),
+                "last_run": _fmt_ts(runtime.last_run_time),
+                "next_run": _fmt_ts(runtime.next_run_time),
+                "server_count": runtime.last_server_count,
+                "run_count": runtime.run_count,
+                "last_error": runtime.last_error,
+                "waiting_2fa": broker.waiting,
+                "twofa_message": broker.message or None,
+            })
+            _http_respond(writer, "200 OK", "application/json", payload)
+
+        elif method == "POST" and path == "/2fa":
+            form = parse_qs(body.decode(errors="replace"))
+            code = "".join((form.get("code") or [""])[0].split())  # strip whitespace
+            if code and broker.submit_code(code):
+                _http_redirect(writer, "/")
+            else:
+                _http_respond(writer, "400 Bad Request", "text/plain",
+                              "Not currently waiting for a 2FA code.")
+        else:
+            _http_respond(writer, "404 Not Found", "text/plain", "Not found")
+
+    except Exception:
+        pass
+    finally:
+        try:
+            await writer.drain()
+        except Exception:
+            pass
+        writer.close()
+
+
+async def _start_web_server(port: int, runtime: _Status, broker: _TwoFABroker) -> asyncio.Server:
+    async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await _web_handler(reader, writer, runtime, broker)
+
+    server = await asyncio.start_server(_handle, "0.0.0.0", port)
+    addr = server.sockets[0].getsockname()
+    print(f"Web dashboard listening on http://{addr[0]}:{addr[1]}", file=sys.stderr)
+    return server
+
+
+async def _authenticate(username: str, password: str) -> Session:
+    """
+    Create a Session and perform initial password authentication.
+    The caller is responsible for calling session.async_logout() when done.
+    """
+    session = Session(appversion=APP_VERSION, user_agent=USER_AGENT)
     print("Authenticating...", file=sys.stderr)
     success = await session.async_authenticate(username, password)
     if not success:
         print("Error: authentication failed.", file=sys.stderr)
         sys.exit(1)
+    return session
 
-    # Build endpoint with conditional IPv6 parameter
+
+async def _fetch_server_list(
+    session: Session,
+    include_ipv6: bool = False,
+    broker: _TwoFABroker | None = None,
+    status: _Status | None = None,
+) -> dict:
+    """
+    Fetch the server list using an existing authenticated session.
+    Handles a 2FA challenge the first time it is encountered (e.g. on the
+    initial request after password-only authentication).  Subsequent calls
+    on the same session skip 2FA because the session token is already valid.
+
+    When a broker is provided (KEEP_RUNNING + web dashboard), 2FA codes are
+    collected via the web form and invalid codes prompt a retry instead of
+    exiting.  Without a broker, the env var / stdin path is used.
+    """
     endpoint = LOGICALS_ENDPOINT_BASE
     if include_ipv6:
         endpoint += "&WithIpV6=1"
 
+    print("Fetching server list...", file=sys.stderr)
     try:
-        print("Fetching server list...", file=sys.stderr)
-        response = await session.async_api_request(endpoint)
+        return await session.async_api_request(endpoint)
     except ProtonAPI2FANeeded:
-        totp_code = os.environ.get("PROTON_2FA")
-        if not totp_code:
-            if not sys.stdin.isatty():
-                print("Error: 2FA required. Set the PROTON_2FA environment variable.", file=sys.stderr)
-                sys.exit(1)
-            print("2FA code: ", end="", file=sys.stderr, flush=True)
-            totp_code = input()
+        if broker is not None:
+            # Web dashboard path: loop until a valid code is submitted
+            while True:
+                if status is not None:
+                    status.state = "waiting_2fa"
+                print("Waiting for 2FA code via web dashboard...", file=sys.stderr)
+                totp_code = await broker.wait_for_code()
+                success = await session.async_validate_2fa_code(totp_code)
+                if success:
+                    if status is not None:
+                        status.state = "running"
+                    print("2FA validated via web dashboard.", file=sys.stderr)
+                    break
+                broker.message = "Invalid code — please try again."
+                print("Invalid 2FA code submitted via web dashboard. Waiting for retry.", file=sys.stderr)
+        else:
+            # stdin / env var path
+            totp_code = os.environ.get("PROTON_2FA")
+            if not totp_code:
+                if not sys.stdin.isatty():
+                    print("Error: 2FA required. Set the PROTON_2FA environment variable.", file=sys.stderr)
+                    sys.exit(1)
+                print("2FA code: ", end="", file=sys.stderr, flush=True)
+                totp_code = input()
 
-        success = await session.async_validate_2fa_code(totp_code)
-        if not success:
-            print("Error: invalid 2FA code.", file=sys.stderr)
-            sys.exit(1)
+            success = await session.async_validate_2fa_code(totp_code)
+            if not success:
+                print("Error: invalid 2FA code.", file=sys.stderr)
+                sys.exit(1)
 
         print("Fetching server list...", file=sys.stderr)
-        response = await session.async_api_request(endpoint)
-
-    await session.async_logout()
-    return response
+        return await session.async_api_request(endpoint)
 
 
 def transform(api_data: dict, max_load: int | None = None, max_servers: int | None = None, include_ipv6: bool = False, secure_core_filter: str = "include", tor_filter: str = "include", free_tier_filter: str = "include") -> dict:
@@ -334,9 +624,44 @@ def transform(api_data: dict, max_load: int | None = None, max_servers: int | No
     }
 
 
-async def run_update(username, password, storage_path, max_load, max_servers, include_ipv6, secure_core_filter, tor_filter, free_tier_filter, replace_gluetun_servers_json, debug, debug_dir):
+def _atomic_write(path: str, content: str) -> None:
+    """Write content to path atomically via a temp file + os.replace()."""
+    dir_path = os.path.dirname(path)
+    fd, tmp_path = tempfile.mkstemp(dir=dir_path, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(content)
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+async def run_update(
+    session: Session,
+    storage_path,
+    max_load,
+    max_servers,
+    include_ipv6,
+    secure_core_filter,
+    tor_filter,
+    free_tier_filter,
+    replace_gluetun_servers_json,
+    debug,
+    debug_dir,
+    *,
+    status: _Status | None = None,
+    broker: _TwoFABroker | None = None,
+):
     """Execute a single update cycle."""
-    api_data = await fetch_server_list(username, password, include_ipv6)
+    if status is not None:
+        status.state = "running"
+        status.last_error = None
+        status.next_run_time = None
+    api_data = await _fetch_server_list(session, include_ipv6, broker=broker, status=status)
     
     # Save debug output if DEBUG=true
     if debug:
@@ -387,16 +712,19 @@ async def run_update(username, password, storage_path, max_load, max_servers, in
 
     # Create output directory if it doesn't exist
     os.makedirs(os.path.dirname(output_file), exist_ok=True)
-    with open(output_file, "w") as f:
-        f.write(output)
+    _atomic_write(output_file, output)
     print(f"\n{count} servers written to {output_file} (from {total} logicals{filter_info})", file=sys.stderr)
 
     # Optionally replace servers.json with servers-proton.json
     if replace_gluetun_servers_json:
         servers_json_file = os.path.join(storage_path, "servers.json")
-        with open(servers_json_file, "w") as f:
-            f.write(output)
+        _atomic_write(servers_json_file, output)
         print(f"Replaced {servers_json_file} with servers-proton.json content", file=sys.stderr)
+
+    if status is not None:
+        status.last_run_time = time.time()
+        status.last_server_count = count
+        status.run_count += 1
 
 
 async def main():
@@ -454,6 +782,14 @@ async def main():
         debug_dir = os.path.join(storage_path, "debug")
 
     if keep_running:
+        # Parse WEB_PORT (only used in KEEP_RUNNING mode, default 8080)
+        web_port_env = os.environ.get("WEB_PORT", "8080")
+        try:
+            web_port = int(web_port_env)
+        except ValueError:
+            print(f"Warning: Invalid WEB_PORT value '{web_port_env}'. Using 8080.", file=sys.stderr)
+            web_port = 8080
+
         print("KEEP_RUNNING enabled: Will run at random intervals between 12-36 hours", file=sys.stderr)
 
         stop_event = asyncio.Event()
@@ -461,38 +797,69 @@ async def main():
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, stop_event.set)
 
-        while not stop_event.is_set():
-            try:
-                await run_update(username, password, storage_path, max_load, max_servers, include_ipv6, secure_core_filter, tor_filter, free_tier_filter, replace_gluetun_servers_json, debug, debug_dir)
-            except Exception as e:
-                print(f"\nError during update: {e}", file=sys.stderr)
-                # Wait 5 minutes before retry, but still respond to stop signal
-                print("Waiting 5 minutes before retry...", file=sys.stderr)
+        runtime = _Status()
+        broker = _TwoFABroker()
+        web_server = await _start_web_server(web_port, runtime, broker)
+
+        runtime.state = "authenticating"
+        session = await _authenticate(username, password)
+        try:
+            while not stop_event.is_set():
                 try:
-                    await asyncio.wait_for(stop_event.wait(), timeout=300)
+                    await run_update(
+                        session, storage_path, max_load, max_servers, include_ipv6,
+                        secure_core_filter, tor_filter, free_tier_filter,
+                        replace_gluetun_servers_json, debug, debug_dir,
+                        status=runtime, broker=broker,
+                    )
+                except Exception as e:
+                    runtime.state = "error"
+                    runtime.last_error = str(e)
+                    print(f"\nError during update: {e}", file=sys.stderr)
+                    # Wait 5 minutes before retry, but still respond to stop signal
+                    print("Waiting 5 minutes before retry...", file=sys.stderr)
+                    try:
+                        await asyncio.wait_for(stop_event.wait(), timeout=300)
+                    except asyncio.TimeoutError:
+                        pass
+                    continue
+
+                if stop_event.is_set():
+                    break
+
+                # Calculate random sleep interval between 12 and 36 hours (in seconds)
+                sleep_hours = random.uniform(12, 36)
+                sleep_seconds = sleep_hours * 3600
+                next_run_time = time.time() + sleep_seconds
+                next_run_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(next_run_time))
+
+                runtime.state = "sleeping"
+                runtime.next_run_time = next_run_time
+                print(f"\nSleeping for {sleep_hours:.2f} hours. Next run at {next_run_str}", file=sys.stderr)
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=sleep_seconds)
                 except asyncio.TimeoutError:
-                    pass
-                continue
-
-            if stop_event.is_set():
-                break
-
-            # Calculate random sleep interval between 12 and 36 hours (in seconds)
-            sleep_hours = random.uniform(12, 36)
-            sleep_seconds = sleep_hours * 3600
-            next_run_time = time.time() + sleep_seconds
-            next_run_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(next_run_time))
-
-            print(f"\nSleeping for {sleep_hours:.2f} hours. Next run at {next_run_str}", file=sys.stderr)
+                    pass  # Normal timeout, continue to next run
+        finally:
+            runtime.state = "shutting_down"
+            web_server.close()
+            await web_server.wait_closed()
             try:
-                await asyncio.wait_for(stop_event.wait(), timeout=sleep_seconds)
-            except asyncio.TimeoutError:
-                pass  # Normal timeout, continue to next run
+                await session.async_logout()
+            except Exception:
+                pass  # best-effort cleanup
 
         print("\nShutdown signal received, exiting...", file=sys.stderr)
     else:
         # Run once and exit
-        await run_update(username, password, storage_path, max_load, max_servers, include_ipv6, secure_core_filter, tor_filter, free_tier_filter, replace_gluetun_servers_json, debug, debug_dir)
+        session = await _authenticate(username, password)
+        try:
+            await run_update(session, storage_path, max_load, max_servers, include_ipv6, secure_core_filter, tor_filter, free_tier_filter, replace_gluetun_servers_json, debug, debug_dir)
+        finally:
+            try:
+                await session.async_logout()
+            except Exception:
+                pass  # best-effort cleanup; session may not be fully authenticated
 
 
 if __name__ == "__main__":
