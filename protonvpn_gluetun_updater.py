@@ -498,7 +498,7 @@ async def _fetch_server_list(
     initial request after password-only authentication).  Subsequent calls
     on the same session skip 2FA because the session token is already valid.
 
-    IPv6 data is always requested from the API regardless of INCLUDE_IPV6;
+    IPv6 data is always requested from the API regardless of IP6;
     the ipv6_filter is applied during transformation to include, exclude, or
     restrict output to servers with IPv6 addresses.
 
@@ -699,12 +699,26 @@ def transform(api_data: dict, ipv6_filter: str = "exclude", secure_core_filter: 
                 wg_server["ips"] = ips
                 servers.append(wg_server)
 
-    # Compute output logical-level counts
+    # Compute output logical-level counts.
+    # For each filtered category, "In Output" is 0 when that type was excluded,
+    # otherwise count from the already-filtered logicals list.
     out_logical = len(logicals)
-    out_ipv6 = sum(1 for s in logicals if any(p.get("EntryIPv6") for p in s["Servers"]))
-    out_tor = sum(1 for s in logicals if s.get("Features", 0) & TOR)
-    out_secure_core = sum(1 for s in logicals if s.get("Features", 0) & SECURE_CORE)
-    out_free = sum(1 for s in logicals if s.get("Tier", 1) == 0)
+    out_ipv6 = (
+        sum(1 for s in logicals if any(p.get("EntryIPv6") for p in s["Servers"]))
+        if ipv6_filter in ("include", "only") else 0
+    )
+    out_tor = (
+        sum(1 for s in logicals if s.get("Features", 0) & TOR)
+        if tor_filter in ("include", "only") else 0
+    )
+    out_secure_core = (
+        sum(1 for s in logicals if s.get("Features", 0) & SECURE_CORE)
+        if secure_core_filter in ("include", "only") else 0
+    )
+    out_free = (
+        sum(1 for s in logicals if s.get("Tier", 1) == 0)
+        if free_tier_filter in ("include", "only") else 0
+    )
     out_p2p = sum(1 for s in logicals if s.get("Features", 0) & P2P)
     out_streaming = sum(1 for s in logicals if s.get("Features", 0) & STREAMING)
 
