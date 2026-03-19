@@ -32,14 +32,12 @@ Edit the compose file to set your credentials and paths.
 | `PROTON_USERNAME`  | Yes      | Proton account username                                                                               |
 | `PROTON_PASSWORD`  | Yes      | Proton account password                                                                               |
 | `STORAGE_FILEPATH` | Yes      | Storage directory path (output file: `servers-proton.json`)                                           |
-| `MAX_LOAD`         | No       | Only include servers with load <= this value (0-100)                                                  |
-| `MAX_SERVERS`      | No       | Limit to the N best servers after sorting and filtering                                               |
 | `SECURE_CORE`      | No       | Filter Secure Core servers: `include` (default), `exclude`, or `only`                                 |
 | `TOR`              | No       | Filter TOR servers: `include` (default), `exclude`, or `only`                                         |
 | `FREE_TIER`        | No       | Filter free tier servers: `include` (default), `exclude`, or `only`                                   |
 | `REPLACE_GLUETUN_SERVERS_JSON` | No | Replace `servers.json` with `servers-proton.json` (`1`/`true`/`yes` or `0`/`false`/`no`, default: `false`) |
 | `WEB_PORT`         | No       | Port for the web dashboard (default: `8080`)                                                          |
-| `INCLUDE_IPV6`     | No       | Retain IPv6 addresses in server entries (`1`/`true`/`yes` or `0`/`false`/`no`, default: `false`). IPv6 data is always fetched from the API but stripped from output when `false`. |
+| `IP6`              | No       | IPv6 address behavior: `include` (add IPv6 IPs to server entries when available), `exclude` (default, strip IPv6 from output), or `only` (filter to servers with IPv6 and include their IPs). IPv6 data is always fetched from the API. |
 | `DEBUG`            | No       | Save raw API response to debug directory (`1`/`true`/`yes` or `0`/`false`/`no`, default: `false`)     |
 | `DEBUG_DIR`        | No       | Debug output directory (default: `STORAGE_FILEPATH/debug` when `DEBUG=true` and `DEBUG_DIR` is unset) |
 
@@ -69,31 +67,26 @@ When `DEBUG=true`, the script saves the raw API response from ProtonVPN before t
 
 The debug output is saved as `serverlist.{EPOCHTIME}.tar.gz` in the debug directory. The uncompressed JSON is automatically removed after compression to save space.
 
-### Filtering and scoring
+### Filtering and sorting
 
-Each logical server returned by the Proton API includes two fields used for ranking:
-
-- **`Load`** (0–100) — current usage percentage of the server
-- **`Score`** (float, lower = better) — internal Proton metric that combines server load and geographic proximity to the user
+Servers are sorted by: secure_core first, then TOR, then alphabetically by country and city, then by **load ascending** (lower load = better).
 
 The filtering pipeline works as follows:
 
-1. **Sort** all logical servers by priority: secure_core servers first, then TOR servers, then alphabetically by country, city, and score (ascending)
-2. **Filter by load** — if `MAX_LOAD` is set, discard any server where `Load > MAX_LOAD`
-3. **Filter by server type** — apply `SECURE_CORE`, `TOR`, and `FREE_TIER` filters:
+1. **Sort** all logical servers by priority: secure_core first, then TOR, then alphabetically by country, city, and load (ascending)
+2. **Filter by server type** — apply `SECURE_CORE`, `TOR`, `FREE_TIER`, and `IP6` filters:
    - `include` (default): include these servers in the output
    - `exclude`: exclude these servers from the output
    - `only`: only include these servers (exclude all others)
-4. **Truncate** — if `MAX_SERVERS` is set, keep only the first N servers from the sorted list
 
 All filters are optional and can be combined. For example:
-- `MAX_LOAD=50 MAX_SERVERS=100` — removes servers above 50% load, keeps 100 best
 - `SECURE_CORE=only TOR=exclude` — only secure_core servers, excluding any with TOR
 - `TOR=only` — only TOR servers
 - `FREE_TIER=exclude` — exclude all free tier servers
 - `FREE_TIER=only` — only free tier servers
+- `IP6=only` — only servers with IPv6 addresses
 
-Without any filter, all servers are exported (sorted by secure_core, TOR, country, city, score).
+Without any filter, all servers are exported (sorted by secure_core, TOR, country, city, load).
 
 ## License
 

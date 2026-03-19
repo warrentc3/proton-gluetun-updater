@@ -11,13 +11,11 @@ services:
       PROTON_USERNAME: username # MANDATORY: Set this to your Proton account username
       PROTON_PASSWORD: password # MANDATORY: Set this to your Proton account password
       STORAGE_FILEPATH: /gluetun # MANDATORY: Storage directory path (output file: servers-proton.json)
-      MAX_LOAD:  # OPTIONAL: Only include servers with load <= this value (0-100)
-      MAX_SERVERS:  # OPTIONAL: Limit to the N best servers after sorting and filtering
       SECURE_CORE: include # OPTIONAL: Filter Secure Core servers: include (default), exclude, or only
       TOR: include # OPTIONAL: Filter TOR servers: include (default), exclude, or only
       FREE_TIER: include # OPTIONAL: Filter free tier servers: include (default), exclude, or only
       REPLACE_GLUETUN_SERVERS_JSON: false # OPTIONAL: Replace servers.json with servers-proton.json. Defaults to false if not set.
       WEB_PORT: 8080 # OPTIONAL: Port for the web dashboard. Defaults to 8080 if not set.
-      INCLUDE_IPV6: true # OPTIONAL: Include IPv6 addresses set to true.  Defaults to false if not set. 
+      IP6: exclude # OPTIONAL: IPv6 behavior: exclude (default), include, or only
       DEBUG: true # OPTIONAL: Enable debug logging set to true.  Defaults to false if not set. 
       DEBUG_DIR: /debug # OPTIONAL: Set this to a directory to store debug logs if DEBUG is enabled.  When DEBUG=true and DEBUG_DIR is unset, defaults to STORAGE_FILEPATH/debug subdirectory.
