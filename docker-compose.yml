@@ -4,7 +4,9 @@ services:
     container_name: protonvpn-gluetun-updater
     volumes:
       - /path/to/gluetun:/gluetun  # Mandatory: Set this to your gluetun configuration directory
-      - /path/to/debug:/debug # Optional: Set this to a directory to store debug logs if DEBUG is enabled.  When DEBUG=true and DEBUG_DIR is unset, defaults to STORAGE_FILEPATH/debug subdirectory. 
+      - /path/to/debug:/debug # Optional: Set this to a directory to store debug logs if DEBUG is enabled.  When DEBUG=true and DEBUG_DIR is unset, defaults to STORAGE_FILEPATH/debug subdirectory.
+    ports:
+      - "8080:8080" # OPTIONAL: Web dashboard port (only active when KEEP_RUNNING=true). Change left side to remap host port. 
     environment:
       PROTON_USERNAME: username # MANDATORY: Set this to your Proton account username
       PROTON_PASSWORD: password # MANDATORY: Set this to your Proton account password
@@ -17,6 +19,7 @@ services:
       FREE_TIER: include # OPTIONAL: Filter free tier servers: include (default), exclude, or only
       REPLACE_GLUETUN_SERVERS_JSON: false # OPTIONAL: Replace servers.json with servers-proton.json. Defaults to false if not set.
       KEEP_RUNNING: false # OPTIONAL: Keep container running and execute at random intervals (12-36 hours). Defaults to false if not set.
+      WEB_PORT: 8080 # OPTIONAL: Port for the web dashboard when KEEP_RUNNING=true. Defaults to 8080 if not set. Not started in single-run mode.
       INCLUDE_IPV6: true # OPTIONAL: Include IPv6 addresses set to true.  Defaults to false if not set. 
       DEBUG: true # OPTIONAL: Enable debug logging set to true.  Defaults to false if not set. 
       DEBUG_DIR: /debug # OPTIONAL: Set this to a directory to store debug logs if DEBUG is enabled.  When DEBUG=true and DEBUG_DIR is unset, defaults to STORAGE_FILEPATH/debug subdirectory.
