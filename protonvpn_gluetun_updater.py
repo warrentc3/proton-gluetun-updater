@@ -22,6 +22,8 @@ Environment variables:
     MAX_LOAD          Max server load percentage to include (0-100, default: no filter)
     MAX_SERVERS       Max number of servers to export, sorted by load (default: no limit)
     INCLUDE_IPV6      Include IPv6 addresses in server entries (1/true/yes or 0/false/no, default: false)
+    SECURE_CORE       Filter secure_core servers: include (default), exclude, or only
+    TOR               Filter TOR servers: include (default), exclude, or only
     DEBUG             Save raw API response to debug directory (1/true/yes or 0/false/no, default: false)
     DEBUG_DIR         Debug output directory (default: STORAGE_FILEPATH/debug when DEBUG=true and DEBUG_DIR is unset)
 """
@@ -155,7 +157,7 @@ async def fetch_server_list(username: str, password: str, include_ipv6: bool = F
     return response
 
 
-def transform(api_data: dict, max_load: int | None = None, max_servers: int | None = None, include_ipv6: bool = False) -> dict:
+def transform(api_data: dict, max_load: int | None = None, max_servers: int | None = None, include_ipv6: bool = False, secure_core_filter: str = "include", tor_filter: str = "include") -> dict:
     """
     Transform ProtonVPN API data to Gluetun format.
     
@@ -166,6 +168,7 @@ def transform(api_data: dict, max_load: int | None = None, max_servers: int | No
     - Fix Wireguard: no tcp/udp properties
     - Deduplicate physical servers for non-secure_core
     - Optional IPv6 address inclusion
+    - Filtering by secure_core and TOR (include/exclude/only)
     """
     # Sort logical servers: secure_core first, then tor, then by country, city, and score
     logicals = sorted(
@@ -182,6 +185,18 @@ def transform(api_data: dict, max_load: int | None = None, max_servers: int | No
     if max_load is not None:
         logicals = [s for s in logicals if s.get("Load", 100) <= max_load]
 
+    # Apply secure_core filter
+    if secure_core_filter == "only":
+        logicals = [s for s in logicals if bool(s.get("Features", 0) & SECURE_CORE)]
+    elif secure_core_filter == "exclude":
+        logicals = [s for s in logicals if not bool(s.get("Features", 0) & SECURE_CORE)]
+
+    # Apply TOR filter
+    if tor_filter == "only":
+        logicals = [s for s in logicals if bool(s.get("Features", 0) & TOR)]
+    elif tor_filter == "exclude":
+        logicals = [s for s in logicals if not bool(s.get("Features", 0) & TOR)]
+
     if max_servers is not None:
         logicals = logicals[:max_servers]
 
@@ -190,7 +205,10 @@ def transform(api_data: dict, max_load: int | None = None, max_servers: int | No
     stats = {
         'skipped_disabled': 0,
         'skipped_duplicate': 0,
+        'skipped_tor': 0,
+        'skipped_secure_core': 0,
         'secure_core': 0,
+        'tor': 0,
         'free_tier': 0,
     }
 
@@ -233,6 +251,8 @@ def transform(api_data: dict, max_load: int | None = None, max_servers: int | No
             # Track statistics
             if is_secure_core:
                 stats['secure_core'] += 1
+            if is_tor:
+                stats['tor'] += 1
             if is_free:
                 stats['free_tier'] += 1
             
@@ -290,6 +310,7 @@ def transform(api_data: dict, max_load: int | None = None, max_servers: int | No
     print(f"  Skipped (disabled): {stats['skipped_disabled']}", file=sys.stderr)
     print(f"  Skipped (duplicate IPs): {stats['skipped_duplicate']}", file=sys.stderr)
     print(f"  Secure core servers: {stats['secure_core']}", file=sys.stderr)
+    print(f"  TOR servers: {stats['tor']}", file=sys.stderr)
     print(f"  Free tier servers: {stats['free_tier']}", file=sys.stderr)
 
     return {
@@ -314,6 +335,18 @@ async def main():
     # Parse INCLUDE_IPV6 (default: false)
     include_ipv6_env = os.environ.get("INCLUDE_IPV6", "false").lower()
     include_ipv6 = include_ipv6_env in ("1", "true", "yes")
+
+    # Parse SECURE_CORE filter (default: include)
+    secure_core_filter = os.environ.get("SECURE_CORE", "include").lower()
+    if secure_core_filter not in ("include", "exclude", "only"):
+        print(f"Warning: Invalid SECURE_CORE value '{secure_core_filter}'. Using 'include'.", file=sys.stderr)
+        secure_core_filter = "include"
+
+    # Parse TOR filter (default: include)
+    tor_filter = os.environ.get("TOR", "include").lower()
+    if tor_filter not in ("include", "exclude", "only"):
+        print(f"Warning: Invalid TOR value '{tor_filter}'. Using 'include'.", file=sys.stderr)
+        tor_filter = "include"
 
     # Parse STORAGE_FILEPATH (directory for output file) - REQUIRED
     storage_path = os.environ.get("STORAGE_FILEPATH")
@@ -358,7 +391,7 @@ async def main():
         print(f"Debug: Removed uncompressed {json_filepath}", file=sys.stderr)
     
     total = len(api_data.get("LogicalServers", []))
-    result = transform(api_data, max_load=max_load, max_servers=max_servers, include_ipv6=include_ipv6)
+    result = transform(api_data, max_load=max_load, max_servers=max_servers, include_ipv6=include_ipv6, secure_core_filter=secure_core_filter, tor_filter=tor_filter)
 
     output = json.dumps(result, indent=2)
     count = len(result["protonvpn"]["servers"])
@@ -371,6 +404,10 @@ async def main():
         filters.append(f"max_load={max_load}%")
     if max_servers is not None:
         filters.append(f"max_servers={max_servers}")
+    if secure_core_filter != "include":
+        filters.append(f"secure_core={secure_core_filter}")
+    if tor_filter != "include":
+        filters.append(f"tor={tor_filter}")
     filter_info = f" ({', '.join(filters)})" if filters else ""
 
     # Create output directory if it doesn't exist
