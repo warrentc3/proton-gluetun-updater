@@ -22,14 +22,19 @@ Environment variables (or interactive prompt):
     MAX_LOAD          Max server load percentage to include (0-100, default: no filter)
     MAX_SERVERS       Max number of servers to export, sorted by load (default: no limit)
     INCLUDE_IPV6      Include IPv6 addresses in server entries (1/true/yes or 0/false/no, default: false)
+    DEBUG             Save raw API response to debug directory (1/true/yes or 0/false/no, default: false)
+    DEBUG_DIR         Debug output directory (default: /out/debug if DEBUG=true)
 """
 import asyncio
 import getpass
+import gzip
 import json
 import os
 import re
 import sys
+import tarfile
 import time
+from pathlib import Path
 
 from proton.session import Session
 from proton.session.exceptions import ProtonAPI2FANeeded
@@ -45,74 +50,23 @@ P2P = 1 << 2          # 4
 STREAMING = 1 << 3    # 8
 IPV6 = 1 << 4         # 16
 
-# Complete ProtonVPN country code mapping (194 countries)
-COUNTRY_NAMES = {
-    'BD': 'Bangladesh', 'BE': 'Belgium', 'BF': 'Burkina Faso', 'BG': 'Bulgaria',
-    'BA': 'Bosnia and Herzegovina', 'BB': 'Barbados', 'WF': 'Wallis and Futuna',
-    'BL': 'Saint Barthelemy', 'BM': 'Bermuda', 'BN': 'Brunei', 'BO': 'Bolivia',
-    'BH': 'Bahrain', 'BI': 'Burundi', 'BJ': 'Benin', 'BT': 'Bhutan', 'JM': 'Jamaica',
-    'BV': 'Bouvet Island', 'BW': 'Botswana', 'WS': 'Samoa',
-    'BQ': 'Bonaire, Saint Eustatius and Saba', 'BR': 'Brazil', 'BS': 'Bahamas',
-    'JE': 'Jersey', 'BY': 'Belarus', 'BZ': 'Belize', 'RU': 'Russia', 'RW': 'Rwanda',
-    'RS': 'Serbia', 'TL': 'East Timor', 'RE': 'Reunion', 'TM': 'Turkmenistan',
-    'TJ': 'Tajikistan', 'RO': 'Romania', 'TK': 'Tokelau', 'GW': 'Guinea-Bissau',
-    'GU': 'Guam', 'GT': 'Guatemala', 'GS': 'South Georgia and the South Sandwich Islands',
-    'GR': 'Greece', 'GQ': 'Equatorial Guinea', 'GP': 'Guadeloupe', 'JP': 'Japan',
-    'GY': 'Guyana', 'GG': 'Guernsey', 'GF': 'French Guiana', 'GE': 'Georgia',
-    'GD': 'Grenada', 'UK': 'United Kingdom', 'GA': 'Gabon', 'SV': 'El Salvador',
-    'GN': 'Guinea', 'GM': 'Gambia', 'GL': 'Greenland', 'GI': 'Gibraltar', 'GH': 'Ghana',
-    'OM': 'Oman', 'TN': 'Tunisia', 'JO': 'Jordan', 'HR': 'Croatia', 'HT': 'Haiti',
-    'HU': 'Hungary', 'HK': 'Hong Kong', 'HN': 'Honduras',
-    'HM': 'Heard Island and McDonald Islands', 'VE': 'Venezuela', 'PR': 'Puerto Rico',
-    'PS': 'Palestinian Territory', 'PW': 'Palau', 'PT': 'Portugal',
-    'SJ': 'Svalbard and Jan Mayen', 'PY': 'Paraguay', 'IQ': 'Iraq', 'PA': 'Panama',
-    'PF': 'French Polynesia', 'PG': 'Papua New Guinea', 'PE': 'Peru', 'PK': 'Pakistan',
-    'PH': 'Philippines', 'PN': 'Pitcairn', 'PL': 'Poland', 'PM': 'Saint Pierre and Miquelon',
-    'ZM': 'Zambia', 'EH': 'Western Sahara', 'EE': 'Estonia', 'EG': 'Egypt',
-    'ZA': 'South Africa', 'EC': 'Ecuador', 'IT': 'Italy', 'VN': 'Vietnam',
-    'SB': 'Solomon Islands', 'ET': 'Ethiopia', 'SO': 'Somalia', 'ZW': 'Zimbabwe',
-    'SA': 'Saudi Arabia', 'ES': 'Spain', 'ER': 'Eritrea', 'ME': 'Montenegro',
-    'MD': 'Moldova', 'MG': 'Madagascar', 'MF': 'Saint Martin', 'MA': 'Morocco',
-    'MC': 'Monaco', 'UZ': 'Uzbekistan', 'MM': 'Myanmar', 'ML': 'Mali', 'MO': 'Macao',
-    'MN': 'Mongolia', 'MH': 'Marshall Islands', 'MK': 'Macedonia', 'MU': 'Mauritius',
-    'MT': 'Malta', 'MW': 'Malawi', 'MV': 'Maldives', 'MQ': 'Martinique',
-    'MP': 'Northern Mariana Islands', 'MS': 'Montserrat', 'MR': 'Mauritania',
-    'IM': 'Isle of Man', 'UG': 'Uganda', 'TZ': 'Tanzania', 'MY': 'Malaysia',
-    'MX': 'Mexico', 'IL': 'Israel', 'FR': 'France', 'IO': 'British Indian Ocean Territory',
-    'SH': 'Saint Helena', 'FI': 'Finland', 'FJ': 'Fiji', 'FK': 'Falkland Islands',
-    'FM': 'Micronesia', 'FO': 'Faroe Islands', 'NI': 'Nicaragua', 'NL': 'Netherlands',
-    'NO': 'Norway', 'NA': 'Namibia', 'VU': 'Vanuatu', 'NC': 'New Caledonia',
-    'NE': 'Niger', 'NF': 'Norfolk Island', 'NG': 'Nigeria', 'NZ': 'New Zealand',
-    'NP': 'Nepal', 'NR': 'Nauru', 'NU': 'Niue', 'CK': 'Cook Islands', 'XK': 'Kosovo',
-    'CI': 'Ivory Coast', 'CH': 'Switzerland', 'CO': 'Colombia', 'CN': 'China',
-    'CM': 'Cameroon', 'CL': 'Chile', 'CC': 'Cocos Islands', 'CA': 'Canada',
-    'CG': 'Republic of the Congo', 'CF': 'Central African Republic',
-    'CD': 'Democratic Republic of the Congo', 'CZ': 'Czech Republic', 'CY': 'Cyprus',
-    'CX': 'Christmas Island', 'CR': 'Costa Rica', 'CW': 'Curacao', 'CV': 'Cape Verde',
-    'CU': 'Cuba', 'SZ': 'Swaziland', 'SY': 'Syria', 'SX': 'Sint Maarten',
-    'KG': 'Kyrgyzstan', 'KE': 'Kenya', 'SS': 'South Sudan', 'SR': 'Suriname',
-    'KI': 'Kiribati', 'KH': 'Cambodia', 'KN': 'Saint Kitts and Nevis', 'KM': 'Comoros',
-    'ST': 'Sao Tome and Principe', 'SK': 'Slovakia', 'KR': 'South Korea',
-    'SI': 'Slovenia', 'KP': 'North Korea', 'KW': 'Kuwait', 'SN': 'Senegal',
-    'SM': 'San Marino', 'SL': 'Sierra Leone', 'SC': 'Seychelles', 'KZ': 'Kazakhstan',
-    'KY': 'Cayman Islands', 'SG': 'Singapore', 'SE': 'Sweden', 'SD': 'Sudan',
-    'DO': 'Dominican Republic', 'DM': 'Dominica', 'DJ': 'Djibouti', 'DK': 'Denmark',
-    'VG': 'British Virgin Islands', 'DE': 'Germany', 'YE': 'Yemen', 'DZ': 'Algeria',
-    'US': 'United States', 'UY': 'Uruguay', 'YT': 'Mayotte',
-    'UM': 'United States Minor Outlying Islands', 'LB': 'Lebanon', 'LC': 'Saint Lucia',
-    'LA': 'Laos', 'TV': 'Tuvalu', 'TW': 'Taiwan', 'TT': 'Trinidad and Tobago',
-    'TR': 'Turkey', 'LK': 'Sri Lanka', 'LI': 'Liechtenstein', 'LV': 'Latvia',
-    'TO': 'Tonga', 'LT': 'Lithuania', 'LU': 'Luxembourg', 'LR': 'Liberia',
-    'LS': 'Lesotho', 'TH': 'Thailand', 'TF': 'French Southern Territories', 'TG': 'Togo',
-    'TD': 'Chad', 'TC': 'Turks and Caicos Islands', 'LY': 'Libya', 'VA': 'Vatican',
-    'VC': 'Saint Vincent and the Grenadines', 'AE': 'United Arab Emirates',
-    'AD': 'Andorra', 'AG': 'Antigua and Barbuda', 'AF': 'Afghanistan', 'AI': 'Anguilla',
-    'VI': 'U.S. Virgin Islands', 'IS': 'Iceland', 'IR': 'Iran', 'AM': 'Armenia',
-    'AL': 'Albania', 'AO': 'Angola', 'AQ': 'Antarctica', 'AS': 'American Samoa',
-    'AR': 'Argentina', 'AU': 'Australia', 'AT': 'Austria', 'AW': 'Aruba', 'IN': 'India',
-    'AX': 'Aland Islands', 'AZ': 'Azerbaijan', 'IE': 'Ireland', 'ID': 'Indonesia',
-    'UA': 'Ukraine', 'QA': 'Qatar', 'MZ': 'Mozambique'
-}
+# Load country names from external file
+def load_country_names() -> dict:
+    """Load country code to name mapping from countries.json."""
+    script_dir = Path(__file__).parent
+    countries_file = script_dir / "countries.json"
+    
+    try:
+        with open(countries_file, 'r') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        print(f"Error: countries.json not found at {countries_file}", file=sys.stderr)
+        sys.exit(1)
+    except json.JSONDecodeError as e:
+        print(f"Error: Invalid JSON in countries.json: {e}", file=sys.stderr)
+        sys.exit(1)
+
+COUNTRY_NAMES = load_country_names()
 
 
 def country_name(code: str) -> str:
@@ -357,7 +311,42 @@ async def main():
     include_ipv6_env = os.environ.get("INCLUDE_IPV6", "false").lower()
     include_ipv6 = include_ipv6_env in ("1", "true", "yes")
 
+    # Parse DEBUG (default: false)
+    debug_env = os.environ.get("DEBUG", "false").lower()
+    debug = debug_env in ("1", "true", "yes")
+
+    # Parse DEBUG_DIR (default: /out/debug if DEBUG=true)
+    debug_dir = os.environ.get("DEBUG_DIR")
+    if debug and not debug_dir:
+        debug_dir = "/out/debug"
+
     api_data = await fetch_server_list(username, password)
+    
+    # Save debug output if DEBUG=true
+    if debug:
+        epoch_time = int(time.time())
+        debug_path = Path(debug_dir)
+        debug_path.mkdir(parents=True, exist_ok=True)
+        
+        json_filename = f"serverlist.{epoch_time}.json"
+        json_filepath = debug_path / json_filename
+        tar_filename = f"serverlist.{epoch_time}.tar.gz"
+        tar_filepath = debug_path / tar_filename
+        
+        # Write JSON file
+        with open(json_filepath, 'w') as f:
+            json.dump(api_data, f, indent=2)
+        print(f"Debug: Saved raw API response to {json_filepath}", file=sys.stderr)
+        
+        # Compress to tar.gz
+        with tarfile.open(tar_filepath, 'w:gz') as tar:
+            tar.add(json_filepath, arcname=json_filename)
+        print(f"Debug: Compressed to {tar_filepath}", file=sys.stderr)
+        
+        # Remove uncompressed JSON
+        json_filepath.unlink()
+        print(f"Debug: Removed uncompressed {json_filepath}", file=sys.stderr)
+    
     total = len(api_data.get("LogicalServers", []))
     result = transform(api_data, max_load=max_load, max_servers=max_servers, include_ipv6=include_ipv6)
 
