@@ -14,6 +14,7 @@ services:
       MAX_SERVERS:  # OPTIONAL: Limit to the N best servers after sorting and filtering
       SECURE_CORE: include # OPTIONAL: Filter Secure Core servers: include (default), exclude, or only
       TOR: include # OPTIONAL: Filter TOR servers: include (default), exclude, or only
+      FREE_TIER: include # OPTIONAL: Filter free tier servers: include (default), exclude, or only
       INCLUDE_IPV6: true # OPTIONAL: Include IPv6 addresses set to true.  Defaults to false if not set. 
       DEBUG: true # OPTIONAL: Enable debug logging set to true.  Defaults to false if not set. 
       DEBUG_DIR: /debug # OPTIONAL: Set this to a directory to store debug logs if DEBUG is enabled.  When DEBUG=true and DEBUG_DIR is unset, defaults to STORAGE_FILEPATH/debug subdirectory.
