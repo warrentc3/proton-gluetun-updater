@@ -21,7 +21,7 @@ Environment variables:
     STORAGE_FILEPATH  Storage directory path (required, output file: servers-proton.json)
     MAX_LOAD          Max server load percentage to include (0-100, default: no filter)
     MAX_SERVERS       Limit to the N best servers after sorting and filtering (default: no limit)
-    INCLUDE_IPV6      Include IPv6 addresses in server entries (1/true/yes or 0/false/no, default: false)
+    INCLUDE_IPV6      Retain IPv6 addresses in server entries (1/true/yes or 0/false/no, default: false; IPv6 data is always fetched but stripped from output when false)
     SECURE_CORE       Filter secure_core servers: include (default), exclude, or only
     TOR               Filter TOR servers: include (default), exclude, or only
     FREE_TIER         Filter free tier servers: include (default), exclude, or only
@@ -51,7 +51,7 @@ from proton.session.exceptions import ProtonAPI2FANeeded
 
 APP_VERSION = "linux-vpn-cli@4.15.2"
 USER_AGENT = "ProtonVPN/4.15.2 (Linux)"
-LOGICALS_ENDPOINT_BASE = "/vpn/v1/logicals?SecureCoreFilter=all"
+LOGICALS_ENDPOINT = "/vpn/v1/logicals?SecureCoreFilter=all&WithIpV6=1"
 
 # Feature bitmask (from proton.vpn.session.servers.types.ServerFeatureEnum)
 SECURE_CORE = 1 << 0  # 1
@@ -368,6 +368,10 @@ async def _web_handler(
         except Exception:
             pass
         writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:
+            pass
 
 
 async def _start_web_server(port: int, runtime: _Status, broker: _TwoFABroker) -> asyncio.Server:
@@ -396,7 +400,6 @@ async def _authenticate(username: str, password: str) -> Session:
 
 async def _fetch_server_list(
     session: Session,
-    include_ipv6: bool = False,
     broker: _TwoFABroker | None = None,
     status: _Status | None = None,
 ) -> dict:
@@ -406,17 +409,17 @@ async def _fetch_server_list(
     initial request after password-only authentication).  Subsequent calls
     on the same session skip 2FA because the session token is already valid.
 
+    IPv6 data is always requested from the API regardless of include_ipv6;
+    the include_ipv6 flag is applied during transformation to filter the
+    addresses out of the output when not wanted.
+
     When a broker is provided (KEEP_RUNNING + web dashboard), 2FA codes are
     collected via the web form and invalid codes prompt a retry instead of
     exiting.  Without a broker, the env var / stdin path is used.
     """
-    endpoint = LOGICALS_ENDPOINT_BASE
-    if include_ipv6:
-        endpoint += "&WithIpV6=1"
-
     print("Fetching server list...", file=sys.stderr)
     try:
-        return await session.async_api_request(endpoint)
+        return await session.async_api_request(LOGICALS_ENDPOINT)
     except ProtonAPI2FANeeded:
         if broker is not None:
             # Web dashboard path: loop until a valid code is submitted
@@ -449,7 +452,7 @@ async def _fetch_server_list(
                 sys.exit(1)
 
         print("Fetching server list...", file=sys.stderr)
-        return await session.async_api_request(endpoint)
+        return await session.async_api_request(LOGICALS_ENDPOINT)
 
 
 def transform(api_data: dict, max_load: int | None = None, max_servers: int | None = None, include_ipv6: bool = False, secure_core_filter: str = "include", tor_filter: str = "include", free_tier_filter: str = "include") -> dict:
@@ -465,9 +468,20 @@ def transform(api_data: dict, max_load: int | None = None, max_servers: int | No
     - Optional IPv6 address inclusion
     - Filtering by secure_core, TOR, and free tier (include/exclude/only)
     """
+    # Compute raw totals from API data before any filtering
+    _all = api_data["LogicalServers"]
+    total_logical = len(_all)
+    total_physical = len(set(p["EntryIP"] for s in _all for p in s["Servers"]))
+    total_ipv6 = sum(1 for s in _all if any(p.get("EntryIPv6") for p in s["Servers"]))
+    total_tor = sum(1 for s in _all if s.get("Features", 0) & TOR)
+    total_secure_core = sum(1 for s in _all if s.get("Features", 0) & SECURE_CORE)
+    total_free = sum(1 for s in _all if s.get("Tier", 1) == 0)
+    total_p2p = sum(1 for s in _all if s.get("Features", 0) & P2P)
+    total_streaming = sum(1 for s in _all if s.get("Features", 0) & STREAMING)
+
     # Sort logical servers: secure_core first, then tor, then by country, city, and score
     logicals = sorted(
-        api_data["LogicalServers"],
+        _all,
         key=lambda s: (
             not bool(s.get("Features", 0) & SECURE_CORE),  # secure_core first
             not bool(s.get("Features", 0) & TOR),           # then tor
@@ -506,11 +520,7 @@ def transform(api_data: dict, max_load: int | None = None, max_servers: int | No
     stats = {
         'skipped_disabled': 0,
         'skipped_duplicate': 0,
-        'skipped_tor': 0,
-        'skipped_secure_core': 0,
-        'secure_core': 0,
-        'tor': 0,
-        'free_tier': 0,
+        'out_physical': 0,
     }
 
     for logical in logicals:
@@ -549,14 +559,9 @@ def transform(api_data: dict, max_load: int | None = None, max_servers: int | No
                     continue
                 seen_ips[entry_ip] = True
             
-            # Track statistics
-            if is_secure_core:
-                stats['secure_core'] += 1
-            if is_tor:
-                stats['tor'] += 1
-            if is_free:
-                stats['free_tier'] += 1
-            
+            # Track physical server output counts
+            stats['out_physical'] += 1
+
             # Create OpenVPN entry (ordered by Server struct definition)
             # Only include feature flags when true
             ovpn_server = {
@@ -606,13 +611,37 @@ def transform(api_data: dict, max_load: int | None = None, max_servers: int | No
                 wg_server["ips"] = ips
                 servers.append(wg_server)
 
-    # Print statistics
+    # Compute output logical-level counts
+    out_logical = len(logicals)
+    out_ipv6 = sum(1 for s in logicals if any(p.get("EntryIPv6") for p in s["Servers"]))
+    out_tor = sum(1 for s in logicals if s.get("Features", 0) & TOR)
+    out_secure_core = sum(1 for s in logicals if s.get("Features", 0) & SECURE_CORE)
+    out_free = sum(1 for s in logicals if s.get("Tier", 1) == 0)
+    out_p2p = sum(1 for s in logicals if s.get("Features", 0) & P2P)
+    out_streaming = sum(1 for s in logicals if s.get("Features", 0) & STREAMING)
+
+    # Print statistics table
+    rows = [
+        ("Physical servers",    total_physical,    stats['out_physical']),
+        ("Logical servers",     total_logical,     out_logical),
+        ("Servers with IPv6",   total_ipv6,        out_ipv6),
+        ("TOR servers",         total_tor,         out_tor),
+        ("Secure core servers", total_secure_core, out_secure_core),
+        ("Free servers",        total_free,        out_free),
+        ("P2P servers",         total_p2p,         out_p2p),
+        ("Streaming servers",   total_streaming,   out_streaming),
+    ]
+    lbl_w = max(len(r[0]) for r in rows)
+    num_w = max(len(str(r[1])) for r in rows)
     print(f"\nTransformation statistics:", file=sys.stderr)
-    print(f"  Skipped (disabled): {stats['skipped_disabled']}", file=sys.stderr)
-    print(f"  Skipped (duplicate IPs): {stats['skipped_duplicate']}", file=sys.stderr)
-    print(f"  Secure core servers: {stats['secure_core']}", file=sys.stderr)
-    print(f"  TOR servers: {stats['tor']}", file=sys.stderr)
-    print(f"  Free tier servers: {stats['free_tier']}", file=sys.stderr)
+    print(f"  {'Category':{lbl_w}}  {'Total':>{num_w}}  In Output", file=sys.stderr)
+    print(f"  {'-' * lbl_w}  {'-' * num_w}  {'-' * 9}", file=sys.stderr)
+    for label, total_val, out_val in rows:
+        print(f"  {label:{lbl_w}}  {total_val:>{num_w}}  {out_val}", file=sys.stderr)
+    if stats['skipped_disabled']:
+        print(f"\n  Note: {stats['skipped_disabled']} physical servers skipped (disabled)", file=sys.stderr)
+    if stats['skipped_duplicate']:
+        print(f"  Note: {stats['skipped_duplicate']} physical servers skipped (duplicate IP)", file=sys.stderr)
 
     return {
         "version": 1,
@@ -661,7 +690,7 @@ async def run_update(
         status.state = "running"
         status.last_error = None
         status.next_run_time = None
-    api_data = await _fetch_server_list(session, include_ipv6, broker=broker, status=status)
+    api_data = await _fetch_server_list(session, broker=broker, status=status)
     
     # Save debug output if DEBUG=true
     if debug:
@@ -688,7 +717,6 @@ async def run_update(
         json_filepath.unlink()
         print(f"Debug: Removed uncompressed {json_filepath}", file=sys.stderr)
     
-    total = len(api_data.get("LogicalServers", []))
     result = transform(api_data, max_load=max_load, max_servers=max_servers, include_ipv6=include_ipv6, secure_core_filter=secure_core_filter, tor_filter=tor_filter, free_tier_filter=free_tier_filter)
 
     output = json.dumps(result, indent=2)
@@ -713,7 +741,7 @@ async def run_update(
     # Create output directory if it doesn't exist
     os.makedirs(os.path.dirname(output_file), exist_ok=True)
     _atomic_write(output_file, output)
-    print(f"\n{count} servers written to {output_file} (from {total} logicals{filter_info})", file=sys.stderr)
+    print(f"\n{count} server entries written to {output_file}{filter_info}", file=sys.stderr)
 
     # Optionally replace servers.json with servers-proton.json
     if replace_gluetun_servers_json:
