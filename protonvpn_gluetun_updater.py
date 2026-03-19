@@ -20,11 +20,13 @@ Environment variables:
     PROTON_2FA        TOTP code (optional, only if 2FA is enabled)
     STORAGE_FILEPATH  Storage directory path (required, output file: servers-proton.json)
     MAX_LOAD          Max server load percentage to include (0-100, default: no filter)
-    MAX_SERVERS       Max number of servers to export, sorted by load (default: no limit)
+    MAX_SERVERS       Limit to the N best servers after sorting and filtering (default: no limit)
     INCLUDE_IPV6      Include IPv6 addresses in server entries (1/true/yes or 0/false/no, default: false)
     SECURE_CORE       Filter secure_core servers: include (default), exclude, or only
     TOR               Filter TOR servers: include (default), exclude, or only
     FREE_TIER         Filter free tier servers: include (default), exclude, or only
+    REPLACE_GLUETUN_SERVERS_JSON  Replace servers.json with servers-proton.json (1/true/yes or 0/false/no, default: false)
+    KEEP_RUNNING      Keep container running and execute at random intervals (1/true/yes or 0/false/no, default: false)
     DEBUG             Save raw API response to debug directory (1/true/yes or 0/false/no, default: false)
     DEBUG_DIR         Debug output directory (default: STORAGE_FILEPATH/debug when DEBUG=true and DEBUG_DIR is unset)
 """
@@ -32,7 +34,9 @@ import asyncio
 import getpass
 import json
 import os
+import random
 import re
+import signal
 import sys
 import tarfile
 import time
@@ -330,52 +334,8 @@ def transform(api_data: dict, max_load: int | None = None, max_servers: int | No
     }
 
 
-async def main():
-    username, password = get_credentials()
-
-    max_load_env = os.environ.get("MAX_LOAD")
-    max_load = int(max_load_env) if max_load_env else None
-
-    max_servers_env = os.environ.get("MAX_SERVERS")
-    max_servers = int(max_servers_env) if max_servers_env else None
-
-    # Parse INCLUDE_IPV6 (default: false)
-    include_ipv6_env = os.environ.get("INCLUDE_IPV6", "false").lower()
-    include_ipv6 = include_ipv6_env in ("1", "true", "yes")
-
-    # Parse SECURE_CORE filter (default: include)
-    secure_core_filter = os.environ.get("SECURE_CORE", "include").lower()
-    if secure_core_filter not in ("include", "exclude", "only"):
-        print(f"Warning: Invalid SECURE_CORE value '{secure_core_filter}'. Using 'include'.", file=sys.stderr)
-        secure_core_filter = "include"
-
-    # Parse TOR filter (default: include)
-    tor_filter = os.environ.get("TOR", "include").lower()
-    if tor_filter not in ("include", "exclude", "only"):
-        print(f"Warning: Invalid TOR value '{tor_filter}'. Using 'include'.", file=sys.stderr)
-        tor_filter = "include"
-
-    # Parse FREE_TIER filter (default: include)
-    free_tier_filter = os.environ.get("FREE_TIER", "include").lower()
-    if free_tier_filter not in ("include", "exclude", "only"):
-        print(f"Warning: Invalid FREE_TIER value '{free_tier_filter}'. Using 'include'.", file=sys.stderr)
-        free_tier_filter = "include"
-
-    # Parse STORAGE_FILEPATH (directory for output file) - REQUIRED
-    storage_path = os.environ.get("STORAGE_FILEPATH")
-    if not storage_path:
-        print("Error: STORAGE_FILEPATH environment variable is required.", file=sys.stderr)
-        sys.exit(1)
-
-    # Parse DEBUG (default: false)
-    debug_env = os.environ.get("DEBUG", "false").lower()
-    debug = debug_env in ("1", "true", "yes")
-
-    # Parse DEBUG_DIR (default: STORAGE_FILEPATH/debug)
-    debug_dir = os.environ.get("DEBUG_DIR")
-    if debug and not debug_dir:
-        debug_dir = os.path.join(storage_path, "debug")
-
+async def run_update(username, password, storage_path, max_load, max_servers, include_ipv6, secure_core_filter, tor_filter, free_tier_filter, replace_gluetun_servers_json, debug, debug_dir):
+    """Execute a single update cycle."""
     api_data = await fetch_server_list(username, password, include_ipv6)
     
     # Save debug output if DEBUG=true
@@ -430,6 +390,109 @@ async def main():
     with open(output_file, "w") as f:
         f.write(output)
     print(f"\n{count} servers written to {output_file} (from {total} logicals{filter_info})", file=sys.stderr)
+
+    # Optionally replace servers.json with servers-proton.json
+    if replace_gluetun_servers_json:
+        servers_json_file = os.path.join(storage_path, "servers.json")
+        with open(servers_json_file, "w") as f:
+            f.write(output)
+        print(f"Replaced {servers_json_file} with servers-proton.json content", file=sys.stderr)
+
+
+async def main():
+    username, password = get_credentials()
+
+    max_load_env = os.environ.get("MAX_LOAD")
+    max_load = int(max_load_env) if max_load_env else None
+
+    max_servers_env = os.environ.get("MAX_SERVERS")
+    max_servers = int(max_servers_env) if max_servers_env else None
+
+    # Parse INCLUDE_IPV6 (default: false)
+    include_ipv6_env = os.environ.get("INCLUDE_IPV6", "false").lower()
+    include_ipv6 = include_ipv6_env in ("1", "true", "yes")
+
+    # Parse SECURE_CORE filter (default: include)
+    secure_core_filter = os.environ.get("SECURE_CORE", "include").lower()
+    if secure_core_filter not in ("include", "exclude", "only"):
+        print(f"Warning: Invalid SECURE_CORE value '{secure_core_filter}'. Using 'include'.", file=sys.stderr)
+        secure_core_filter = "include"
+
+    # Parse TOR filter (default: include)
+    tor_filter = os.environ.get("TOR", "include").lower()
+    if tor_filter not in ("include", "exclude", "only"):
+        print(f"Warning: Invalid TOR value '{tor_filter}'. Using 'include'.", file=sys.stderr)
+        tor_filter = "include"
+
+    # Parse FREE_TIER filter (default: include)
+    free_tier_filter = os.environ.get("FREE_TIER", "include").lower()
+    if free_tier_filter not in ("include", "exclude", "only"):
+        print(f"Warning: Invalid FREE_TIER value '{free_tier_filter}'. Using 'include'.", file=sys.stderr)
+        free_tier_filter = "include"
+
+    # Parse REPLACE_GLUETUN_SERVERS_JSON (default: false)
+    replace_gluetun_servers_json_env = os.environ.get("REPLACE_GLUETUN_SERVERS_JSON", "false").lower()
+    replace_gluetun_servers_json = replace_gluetun_servers_json_env in ("1", "true", "yes")
+
+    # Parse KEEP_RUNNING (default: false)
+    keep_running_env = os.environ.get("KEEP_RUNNING", "false").lower()
+    keep_running = keep_running_env in ("1", "true", "yes")
+
+    # Parse STORAGE_FILEPATH (directory for output file) - REQUIRED
+    storage_path = os.environ.get("STORAGE_FILEPATH")
+    if not storage_path:
+        print("Error: STORAGE_FILEPATH environment variable is required.", file=sys.stderr)
+        sys.exit(1)
+
+    # Parse DEBUG (default: false)
+    debug_env = os.environ.get("DEBUG", "false").lower()
+    debug = debug_env in ("1", "true", "yes")
+
+    # Parse DEBUG_DIR (default: STORAGE_FILEPATH/debug)
+    debug_dir = os.environ.get("DEBUG_DIR")
+    if debug and not debug_dir:
+        debug_dir = os.path.join(storage_path, "debug")
+
+    if keep_running:
+        print("KEEP_RUNNING enabled: Will run at random intervals between 12-36 hours", file=sys.stderr)
+
+        stop_event = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, stop_event.set)
+
+        while not stop_event.is_set():
+            try:
+                await run_update(username, password, storage_path, max_load, max_servers, include_ipv6, secure_core_filter, tor_filter, free_tier_filter, replace_gluetun_servers_json, debug, debug_dir)
+            except Exception as e:
+                print(f"\nError during update: {e}", file=sys.stderr)
+                # Wait 5 minutes before retry, but still respond to stop signal
+                print("Waiting 5 minutes before retry...", file=sys.stderr)
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=300)
+                except asyncio.TimeoutError:
+                    pass
+                continue
+
+            if stop_event.is_set():
+                break
+
+            # Calculate random sleep interval between 12 and 36 hours (in seconds)
+            sleep_hours = random.uniform(12, 36)
+            sleep_seconds = sleep_hours * 3600
+            next_run_time = time.time() + sleep_seconds
+            next_run_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(next_run_time))
+
+            print(f"\nSleeping for {sleep_hours:.2f} hours. Next run at {next_run_str}", file=sys.stderr)
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=sleep_seconds)
+            except asyncio.TimeoutError:
+                pass  # Normal timeout, continue to next run
+
+        print("\nShutdown signal received, exiting...", file=sys.stderr)
+    else:
+        # Run once and exit
+        await run_update(username, password, storage_path, max_load, max_servers, include_ipv6, secure_core_filter, tor_filter, free_tier_filter, replace_gluetun_servers_json, debug, debug_dir)
 
 
 if __name__ == "__main__":
