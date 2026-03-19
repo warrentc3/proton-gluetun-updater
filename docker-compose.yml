@@ -1,10 +1,6 @@
 services:
   gtupdate:
-    ## use repository image (latest):
     image: ghcr.io/warrentc3/proton-gluetun-updater:latest
-    pull_policy: always
-    ## build from source (local):
-    ## build: .
     container_name: protonvpn-gluetun-updater
     volumes:
       - /path/to/gluetun:/gluetun  # Mandatory: Set this to your gluetun configuration directory
@@ -15,7 +11,9 @@ services:
       PROTON_2FA: "" # OPTIONAL: Set this to your TOTP code if 2FA is enabled on your account
       STORAGE_FILEPATH: /gluetun # MANDATORY: Storage directory path (output file: servers-proton.json)
       MAX_LOAD:  # OPTIONAL: Only include servers with load <= this value (0-100)
-      MAX_SERVERS:  # OPTIONAL: Limit to the N best servers, sorted by score
+      MAX_SERVERS:  # OPTIONAL: Limit to the N best servers after sorting and filtering
+      SECURE_CORE: include # OPTIONAL: Filter Secure Core servers: include (default), exclude, or only
+      TOR: include # OPTIONAL: Filter TOR servers: include (default), exclude, or only
       INCLUDE_IPV6: true # OPTIONAL: Include IPv6 addresses set to true.  Defaults to false if not set. 
       DEBUG: true # OPTIONAL: Enable debug logging set to true.  Defaults to false if not set. 
       DEBUG_DIR: /debug # OPTIONAL: Set this to a directory to store debug logs if DEBUG is enabled.  When DEBUG=true and DEBUG_DIR is unset, defaults to STORAGE_FILEPATH/debug subdirectory.
