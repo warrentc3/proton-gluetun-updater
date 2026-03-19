@@ -24,23 +24,23 @@ tasks:
     summary: |
       Build then run the protonvpn-gluetun-updater container.
 
-      The container receives OUTPUT_FILE and MAX_LOAD as environment
-      variables. The parent directory of OUTPUT_FILE is mounted as a
-      volume so the container can write the servers.json file.
+      The container receives STORAGE_FILEPATH and MAX_LOAD as environment
+      variables. STORAGE_FILEPATH is mounted as a volume so the container
+      can write the servers-proton.json file.
     deps:
       - build
     env:
-      OUTPUT_FILE: /mnt/nas/k8s/volumes/gluetun/servers.json
+      STORAGE_FILEPATH: /mnt/nas/k8s/volumes/gluetun
       MAX_LOAD: "50"
     preconditions:
-      - sh: test -d $(dirname $OUTPUT_FILE)
-        msg: "Output directory does not exist: $(dirname $OUTPUT_FILE)"
+      - sh: test -d $STORAGE_FILEPATH
+        msg: "Storage directory does not exist: $STORAGE_FILEPATH"
     cmds:
       - docker run --rm -it
-        -e OUTPUT_FILE
+        -e STORAGE_FILEPATH
         -e MAX_LOAD
         -e PROTON_USERNAME
-        -v $(dirname $OUTPUT_FILE):$(dirname $OUTPUT_FILE)
+        -v $STORAGE_FILEPATH:$STORAGE_FILEPATH
         {{.IMAGE_NAME}}
 
   update-gluetun-protonvpn-servers:

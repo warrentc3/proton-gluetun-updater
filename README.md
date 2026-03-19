@@ -98,32 +98,37 @@ The resulting Gluetun output for the example above:
 pip install -r requirements.txt
 
 # Interactive (prompts for credentials and 2FA code)
-python protonvpn_gluetun_updater.py > servers.json
+STORAGE_FILEPATH=/data/gluetun \
+python protonvpn_gluetun_updater.py
 
 # Via environment variables
 PROTON_USERNAME=user \
 PROTON_PASSWORD=pass \
 PROTON_2FA=123456 \
-python protonvpn_gluetun_updater.py > servers.json
+STORAGE_FILEPATH=/data/gluetun \
+python protonvpn_gluetun_updater.py
 
 # Include IPv6 addresses
 PROTON_USERNAME=user \
 PROTON_PASSWORD=pass \
 INCLUDE_IPV6=true \
-python protonvpn_gluetun_updater.py > servers.json
+STORAGE_FILEPATH=/data/gluetun \
+python protonvpn_gluetun_updater.py
 
-# Enable debug mode (saves raw API response to /out/debug)
+# Enable debug mode (saves to STORAGE_FILEPATH/debug)
 PROTON_USERNAME=user \
 PROTON_PASSWORD=pass \
 DEBUG=true \
-python protonvpn_gluetun_updater.py > servers.json
+STORAGE_FILEPATH=/data/gluetun \
+python protonvpn_gluetun_updater.py
 
 # Debug mode with custom directory
 PROTON_USERNAME=user \
 PROTON_PASSWORD=pass \
 DEBUG=true \
 DEBUG_DIR=/tmp/protonvpn-debug \
-python protonvpn_gluetun_updater.py > servers.json
+STORAGE_FILEPATH=/data/gluetun \
+python protonvpn_gluetun_updater.py
 
 # Combined: IPv6 enabled + debug mode + filtering
 PROTON_USERNAME=user \
@@ -131,21 +136,34 @@ PROTON_PASSWORD=pass \
 INCLUDE_IPV6=true \
 DEBUG=true \
 MAX_LOAD=75 \
-python protonvpn_gluetun_updater.py > servers.json
+STORAGE_FILEPATH=/data/gluetun \
+python protonvpn_gluetun_updater.py
 ```
 
 ### Docker
 
+Pull the latest image from GitHub Container Registry:
+
+```bash
+docker pull ghcr.io/warrentc3/proton-gluetun-updater:latest
+```
+
+Or build from source:
+
 ```bash
 docker build -t protonvpn-gluetun-updater .
+```
 
+Run with the GHCR image:
+
+```bash
 docker run --rm \
   -e PROTON_USERNAME=user \
   -e PROTON_PASSWORD=pass \
   -e PROTON_2FA=123456 \
-  -e OUTPUT_FILE=/out/servers.json \
-  -v /path/to/output:/out \
-  protonvpn-gluetun-updater
+  -e STORAGE_FILEPATH=/gluetun \
+  -v /path/to/gluetun:/gluetun \
+  ghcr.io/warrentc3/proton-gluetun-updater:latest
 
 # Only servers with load <= 50% and keep the 100 best
 docker run --rm \
@@ -154,27 +172,27 @@ docker run --rm \
   -e PROTON_2FA=123456 \
   -e MAX_LOAD=50 \
   -e MAX_SERVERS=100 \
-  -e OUTPUT_FILE=/out/servers.json \
-  -v /path/to/output:/out \
-  protonvpn-gluetun-updater
+  -e STORAGE_FILEPATH=/gluetun \
+  -v /path/to/gluetun:/gluetun \
+  ghcr.io/warrentc3/proton-gluetun-updater:latest
 
 # Include IPv6 addresses
 docker run --rm \
   -e PROTON_USERNAME=user \
   -e PROTON_PASSWORD=pass \
   -e INCLUDE_IPV6=true \
-  -e OUTPUT_FILE=/out/servers.json \
-  -v /path/to/output:/out \
-  protonvpn-gluetun-updater
+  -e STORAGE_FILEPATH=/gluetun \
+  -v /path/to/gluetun:/gluetun \
+  ghcr.io/warrentc3/proton-gluetun-updater:latest
 
-# Enable debug mode (saves to /out/debug)
+# Enable debug mode (saves to /gluetun by default)
 docker run --rm \
   -e PROTON_USERNAME=user \
   -e PROTON_PASSWORD=pass \
   -e DEBUG=true \
-  -e OUTPUT_FILE=/out/servers.json \
-  -v /path/to/output:/out \
-  protonvpn-gluetun-updater
+  -e STORAGE_FILEPATH=/gluetun \
+  -v /path/to/gluetun:/gluetun \
+  ghcr.io/warrentc3/proton-gluetun-updater:latest
 
 # Debug with custom directory
 docker run --rm \
@@ -182,10 +200,10 @@ docker run --rm \
   -e PROTON_PASSWORD=pass \
   -e DEBUG=true \
   -e DEBUG_DIR=/debug \
-  -e OUTPUT_FILE=/out/servers.json \
-  -v /path/to/output:/out \
+  -e STORAGE_FILEPATH=/gluetun \
+  -v /path/to/gluetun:/gluetun \
   -v /path/to/debug:/debug \
-  protonvpn-gluetun-updater
+  ghcr.io/warrentc3/proton-gluetun-updater:latest
 
 # Full example: filtering + IPv6 + debug
 docker run --rm \
@@ -195,9 +213,9 @@ docker run --rm \
   -e MAX_SERVERS=100 \
   -e INCLUDE_IPV6=true \
   -e DEBUG=true \
-  -e OUTPUT_FILE=/out/servers.json \
-  -v /path/to/output:/out \
-  protonvpn-gluetun-updater
+  -e STORAGE_FILEPATH=/gluetun \
+  -v /path/to/gluetun:/gluetun \
+  ghcr.io/warrentc3/proton-gluetun-updater:latest
 ```
 
 > **Note:** When using Docker, the `PROTON_2FA` environment variable is required if your account has 2FA enabled (interactive prompt is not available).
@@ -226,12 +244,12 @@ Without any filter, all servers are exported (sorted by score).
 | `PROTON_USERNAME` | Yes | Proton account username |
 | `PROTON_PASSWORD` | Yes | Proton account password |
 | `PROTON_2FA` | No | TOTP code (required if 2FA is enabled on the account) |
-| `OUTPUT_FILE` | No | Output file path (defaults to stdout) |
+| `STORAGE_FILEPATH` | Yes | Storage directory path (output file: `servers-proton.json`) |
 | `MAX_LOAD` | No | Only include servers with load <= this value (0-100) |
 | `MAX_SERVERS` | No | Limit to the N best servers, sorted by score |
 | `INCLUDE_IPV6` | No | Include IPv6 addresses in server entries (`1`/`true`/`yes` or `0`/`false`/`no`, default: `false`) |
 | `DEBUG` | No | Save raw API response to debug directory (`1`/`true`/`yes` or `0`/`false`/`no`, default: `false`) |
-| `DEBUG_DIR` | No | Debug output directory (default: `/out/debug` if `DEBUG=true`) |
+| `DEBUG_DIR` | No | Debug output directory (default: `STORAGE_FILEPATH/debug` when `DEBUG=true` and `DEBUG_DIR` is unset) |
 
 ## Debug Mode
 
@@ -244,8 +262,17 @@ The debug output is saved as `serverlist.{EPOCHTIME}.tar.gz` in the debug direct
 
 Example:
 ```bash
-# Save debug output to default location (/out/debug)
-DEBUG=true python protonvpn_gluetun_updater.py > servers.json
+# Save debug output to default location (STORAGE_FILEPATH/debug)
+PROTON_USERNAME=user \
+PROTON_PASSWORD=pass \
+STORAGE_FILEPATH=/data/gluetun \
+DEBUG=true \
+python protonvpn_gluetun_updater.py
+
+# With storage directory, debug files go to STORAGE_FILEPATH/debug subdirectory
+STORAGE_FILEPATH=/data/gluetun \
+DEBUG=true \
+python protonvpn_gluetun_updater.py
 
 # Save debug output to custom location
 DEBUG=true DEBUG_DIR=/data/debug python protonvpn_gluetun_updater.py > servers.json
