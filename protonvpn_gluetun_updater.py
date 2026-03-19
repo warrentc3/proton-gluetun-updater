@@ -17,7 +17,6 @@ IMPROVEMENTS over original version:
 Environment variables:
     PROTON_USERNAME   Proton account username
     PROTON_PASSWORD   Proton account password
-    PROTON_2FA        TOTP code (optional, only if 2FA is enabled)
     STORAGE_FILEPATH  Storage directory path (required, output file: servers-proton.json)
     MAX_LOAD          Max server load percentage to include (0-100, default: no filter)
     MAX_SERVERS       Limit to the N best servers after sorting and filtering (default: no limit)
@@ -26,8 +25,7 @@ Environment variables:
     TOR               Filter TOR servers: include (default), exclude, or only
     FREE_TIER         Filter free tier servers: include (default), exclude, or only
     REPLACE_GLUETUN_SERVERS_JSON  Replace servers.json with servers-proton.json (1/true/yes or 0/false/no, default: false)
-    KEEP_RUNNING      Keep container running and execute at random intervals (1/true/yes or 0/false/no, default: false)
-    WEB_PORT          Web dashboard port when KEEP_RUNNING=true (default: 8080; not started in single-run mode)
+    WEB_PORT          Web dashboard port (default: 8080)
     DEBUG             Save raw API response to debug directory (1/true/yes or 0/false/no, default: false)
     DEBUG_DIR         Debug output directory (default: STORAGE_FILEPATH/debug when DEBUG=true and DEBUG_DIR is unset)
 """
@@ -143,6 +141,7 @@ class _Status:
     last_server_count: int | None = None
     last_error: str | None = None
     run_count: int = 0
+    last_stats: dict | None = None
 
 
 class _TwoFABroker:
@@ -212,23 +211,62 @@ _HTML_PAGE = """\
     .stat .val{font-size:.88rem;font-family:monospace;color:#e2e8f0}
     .err{margin-top:1rem;background:#1c0a0a;border:1px solid #7f1d1d;border-radius:6px;
          padding:.75rem;font-size:.78rem;color:#fca5a5;font-family:monospace;word-break:break-all}
-    .tfa{background:#1e2130;border:1px solid #92400e;border-radius:10px;
+    .tfa{background:#1e2130;border:1px solid #2d3348;border-radius:10px;
          padding:1.5rem;width:100%;max-width:540px}
-    .tfa h2{font-size:1rem;color:#fdba74;margin-bottom:.4rem}
-    .tfa p{font-size:.8rem;color:#94a3b8;margin-bottom:.8rem}
+    .tfa.active{border-color:#92400e}
+    .tfa h2{font-size:1rem;color:#94a3b8;margin-bottom:.4rem}
+    .tfa.active h2{color:#fdba74}
+    .tfa p{font-size:.8rem;color:#64748b;margin-bottom:.8rem}
+    .tfa.active p{color:#94a3b8}
     .tfa-msg{font-size:.78rem;color:#fca5a5;margin-bottom:.6rem}
     .tfa-form{display:flex;gap:.5rem}
-    .tfa-in{flex:1;background:#0f1117;border:1px solid #475569;border-radius:6px;
-            padding:.5rem .75rem;color:#e2e8f0;font-size:1.1rem;letter-spacing:.2em;
-            text-align:center;font-family:monospace;outline:none}
-    .tfa-in:focus{border-color:#f97316}
-    .tfa-btn{background:#f97316;color:#fff;border:none;border-radius:6px;
-             padding:.5rem 1.2rem;font-size:.9rem;font-weight:600;cursor:pointer}
-    .tfa-btn:hover{background:#ea580c}
+    .tfa-in{flex:1;background:#0f1117;border:1px solid #2d3348;border-radius:6px;
+            padding:.5rem .75rem;color:#64748b;font-size:1.1rem;letter-spacing:.2em;
+            text-align:center;font-family:monospace;outline:none;cursor:not-allowed}
+    .tfa.active .tfa-in{border-color:#475569;color:#e2e8f0;cursor:text}
+    .tfa.active .tfa-in:focus{border-color:#f97316}
+    .tfa-btn{background:#334155;color:#64748b;border:none;border-radius:6px;
+             padding:.5rem 1.2rem;font-size:.9rem;font-weight:600;cursor:not-allowed}
+    .tfa.active .tfa-btn{background:#f97316;color:#fff;cursor:pointer}
+    .tfa.active .tfa-btn:hover{background:#ea580c}
+    .stats-tbl{width:100%;border-collapse:collapse;font-size:.8rem;margin-top:.2rem}
+    .stats-tbl th{text-align:left;color:#64748b;font-weight:600;font-size:.68rem;
+                  text-transform:uppercase;letter-spacing:.08em;padding:.3rem .5rem;
+                  border-bottom:1px solid #2d3348}
+    .stats-tbl th:not(:first-child),.stats-tbl td:not(:first-child){text-align:right}
+    .stats-tbl td{padding:.3rem .5rem;font-family:monospace;color:#e2e8f0;
+                  border-bottom:1px solid #1a1f2e}
+    .stats-tbl tr:last-child td{border-bottom:none}
+    .stats-tbl .match{color:#86efac}
+    .stats-tbl .diff{color:#fca5a5}
+    .stats-notes{margin-top:.6rem;font-size:.72rem;color:#64748b}
     footer{font-size:.7rem;color:#334155;margin-top:1.5rem}
+    #theme-btn{position:fixed;top:.9rem;right:1rem;background:transparent;border:1px solid #2d3348;
+      border-radius:6px;color:#64748b;font-size:1.05rem;cursor:pointer;padding:.28rem .6rem;
+      z-index:100;line-height:1;transition:border-color .15s,color .15s;user-select:none}
+    #theme-btn:hover{border-color:#475569;color:#94a3b8}
+    body.light{background:#f0f4f8;color:#1e293b}
+    body.light .sub{color:#475569}
+    body.light .card{background:#fff;border-color:#cbd5e1}
+    body.light .stat label{color:#475569}
+    body.light .stat .val{color:#1e293b}
+    body.light .err{background:#fef2f2;border-color:#fca5a5}
+    body.light .tfa{background:#fff;border-color:#cbd5e1}
+    body.light .tfa h2{color:#475569}
+    body.light .tfa p{color:#475569}
+    body.light .tfa-in{background:#f8fafc;border-color:#cbd5e1;color:#475569}
+    body.light .tfa.active .tfa-in{border-color:#94a3b8;color:#1e293b}
+    body.light .tfa-btn{background:#e2e8f0;color:#475569}
+    body.light .stats-tbl th{color:#475569;border-bottom-color:#cbd5e1}
+    body.light .stats-tbl td{color:#1e293b;border-bottom-color:#e2e8f0}
+    body.light .stats-notes{color:#475569}
+    body.light #theme-btn{border-color:#cbd5e1;color:#475569}
+    body.light #theme-btn:hover{border-color:#94a3b8;color:#1e293b}
+    body.light footer{color:#94a3b8}
   </style>
 </head>
 <body>
+  <button id="theme-btn" title="Switch to light mode" aria-label="Toggle theme">☀️</button>
   <h1>ProtonVPN Gluetun Updater</h1>
   <p class="sub">Server list refresh service</p>
   <div class="card">
@@ -242,14 +280,22 @@ _HTML_PAGE = """\
     </div>
     <div id="err" class="err" style="display:none"></div>
   </div>
-  <div class="tfa" id="tfa_card" style="display:none">
-    <h2>&#x1F511; 2FA Required</h2>
-    <p>Enter your 6-digit authenticator code to continue.</p>
+  <div class="card" id="stats_card" style="display:none">
+    <div style="font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:#64748b;margin-bottom:.8rem">Last Run Statistics</div>
+    <table class="stats-tbl">
+      <thead><tr><th>Category</th><th>Total</th><th>In Output</th></tr></thead>
+      <tbody id="stats_body"></tbody>
+    </table>
+    <div id="stats_notes" class="stats-notes"></div>
+  </div>
+  <div class="tfa" id="tfa_card">
+    <h2>&#x1F511; 2FA</h2>
+    <p id="tfa_desc">2FA is not currently required.</p>
     <div id="tfa_msg" class="tfa-msg" style="display:none"></div>
-    <form class="tfa-form" method="POST" action="/2fa">
+    <form class="tfa-form" method="POST" action="/2fa" id="tfa_form">
       <input class="tfa-in" type="text" name="code" maxlength="8" inputmode="numeric"
-             pattern="[0-9 ]*" placeholder="000000" autocomplete="one-time-code" autofocus>
-      <button class="tfa-btn" type="submit">Submit</button>
+             pattern="[0-9 ]*" placeholder="000000" autocomplete="one-time-code" id="tfa_input" disabled>
+      <button class="tfa-btn" type="submit" id="tfa_btn" disabled>Submit</button>
     </form>
   </div>
   <footer>Auto-refreshes every 10 s &mdash; last: <span id="ts">never</span></footer>
@@ -268,13 +314,57 @@ _HTML_PAGE = """\
         var eb=document.getElementById('err');
         if(d.last_error){eb.style.display='block';eb.textContent=d.last_error;}
         else{eb.style.display='none';}
-        document.getElementById('tfa_card').style.display=d.waiting_2fa?'block':'none';
+        var sc=document.getElementById('stats_card');
+        var sb=document.getElementById('stats_body');
+        var sn=document.getElementById('stats_notes');
+        if(d.stats&&d.stats.rows&&d.stats.rows.length){
+          sc.style.display='block';sb.innerHTML='';
+          d.stats.rows.forEach(function(r){
+            var cls=r.total===r.out?'match':'diff';
+            sb.innerHTML+='<tr><td>'+r.label+'</td><td>'+r.total.toLocaleString()+'</td><td class="'+cls+'">'+r.out.toLocaleString()+'</td></tr>';
+          });
+          var notes=[];
+          if(d.stats.skipped_disabled)notes.push(d.stats.skipped_disabled.toLocaleString()+' physical records skipped (disabled)');
+          if(d.stats.skipped_duplicate)notes.push(d.stats.skipped_duplicate.toLocaleString()+' physical records skipped (duplicate IP)');
+          sn.textContent=notes.join(' \u00b7 ');
+        }else{sc.style.display='none';}
+        var tc=document.getElementById('tfa_card');
+        var ti=document.getElementById('tfa_input');
+        var tb=document.getElementById('tfa_btn');
+        var td=document.getElementById('tfa_desc');
+        if(d.waiting_2fa){
+          tc.classList.add('active');
+          ti.disabled=false;tb.disabled=false;
+          td.textContent='Enter your 6-digit authenticator code to continue.';
+          ti.focus();
+        }else{
+          tc.classList.remove('active');
+          ti.disabled=true;tb.disabled=true;ti.value='';
+          td.textContent='2FA is not currently required.';
+        }
         var tm=document.getElementById('tfa_msg');
         if(d.twofa_message){tm.style.display='block';tm.textContent=d.twofa_message;}
         else{tm.style.display='none';}
         set('ts',new Date().toLocaleTimeString());
       }catch(e){}
     }
+    (function(){
+      var btn=document.getElementById('theme-btn');
+      function applyTheme(t){
+        if(t==='light'){
+          document.body.classList.add('light');
+          btn.textContent='🌙';btn.title='Switch to dark mode';
+        }else{
+          document.body.classList.remove('light');
+          btn.textContent='☀️';btn.title='Switch to light mode';
+        }
+      }
+      applyTheme(localStorage.getItem('theme')||'dark');
+      btn.addEventListener('click',function(){
+        var next=document.body.classList.contains('light')?'dark':'light';
+        localStorage.setItem('theme',next);applyTheme(next);
+      });
+    })();
     refresh();setInterval(refresh,10000);
   </script>
 </body></html>
@@ -346,6 +436,7 @@ async def _web_handler(
                 "last_error": runtime.last_error,
                 "waiting_2fa": broker.waiting,
                 "twofa_message": broker.message or None,
+                "stats": runtime.last_stats,
             })
             _http_respond(writer, "200 OK", "application/json", payload)
 
@@ -413,9 +504,9 @@ async def _fetch_server_list(
     the include_ipv6 flag is applied during transformation to filter the
     addresses out of the output when not wanted.
 
-    When a broker is provided (KEEP_RUNNING + web dashboard), 2FA codes are
-    collected via the web form and invalid codes prompt a retry instead of
-    exiting.  Without a broker, the env var / stdin path is used.
+    When a broker is provided, 2FA codes are collected via the web form and
+    invalid codes prompt a retry instead of exiting.  Without a broker (dev/
+    interactive use), a TTY stdin prompt is used.
     """
     print("Fetching server list...", file=sys.stderr)
     try:
@@ -437,14 +528,15 @@ async def _fetch_server_list(
                 broker.message = "Invalid code — please try again."
                 print("Invalid 2FA code submitted via web dashboard. Waiting for retry.", file=sys.stderr)
         else:
-            # stdin / env var path
-            totp_code = os.environ.get("PROTON_2FA")
-            if not totp_code:
-                if not sys.stdin.isatty():
-                    print("Error: 2FA required. Set the PROTON_2FA environment variable.", file=sys.stderr)
-                    sys.exit(1)
-                print("2FA code: ", end="", file=sys.stderr, flush=True)
-                totp_code = input()
+            # Single-run mode: read from stdin if a TTY is attached, otherwise exit
+            if not sys.stdin.isatty():
+                print(
+                    "Error: 2FA required. Use the web dashboard to submit your TOTP code interactively.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            print("2FA code: ", end="", file=sys.stderr, flush=True)
+            totp_code = input()
 
             success = await session.async_validate_2fa_code(totp_code)
             if not success:
@@ -455,7 +547,7 @@ async def _fetch_server_list(
         return await session.async_api_request(LOGICALS_ENDPOINT)
 
 
-def transform(api_data: dict, max_load: int | None = None, max_servers: int | None = None, include_ipv6: bool = False, secure_core_filter: str = "include", tor_filter: str = "include", free_tier_filter: str = "include") -> dict:
+def transform(api_data: dict, max_load: int | None = None, max_servers: int | None = None, include_ipv6: bool = False, secure_core_filter: str = "include", tor_filter: str = "include", free_tier_filter: str = "include") -> tuple[dict, dict]:
     """
     Transform ProtonVPN API data to Gluetun format.
     
@@ -643,6 +735,11 @@ def transform(api_data: dict, max_load: int | None = None, max_servers: int | No
     if stats['skipped_duplicate']:
         print(f"  Note: {stats['skipped_duplicate']} physical servers skipped (duplicate IP)", file=sys.stderr)
 
+    stats_payload = {
+        "rows": [{"label": label, "total": total_val, "out": out_val} for label, total_val, out_val in rows],
+        "skipped_disabled": stats['skipped_disabled'],
+        "skipped_duplicate": stats['skipped_duplicate'],
+    }
     return {
         "version": 1,
         "protonvpn": {
@@ -650,7 +747,7 @@ def transform(api_data: dict, max_load: int | None = None, max_servers: int | No
             "timestamp": int(time.time()),
             "servers": servers,
         },
-    }
+    }, stats_payload
 
 
 def _atomic_write(path: str, content: str) -> None:
@@ -717,7 +814,7 @@ async def run_update(
         json_filepath.unlink()
         print(f"Debug: Removed uncompressed {json_filepath}", file=sys.stderr)
     
-    result = transform(api_data, max_load=max_load, max_servers=max_servers, include_ipv6=include_ipv6, secure_core_filter=secure_core_filter, tor_filter=tor_filter, free_tier_filter=free_tier_filter)
+    result, transform_stats = transform(api_data, max_load=max_load, max_servers=max_servers, include_ipv6=include_ipv6, secure_core_filter=secure_core_filter, tor_filter=tor_filter, free_tier_filter=free_tier_filter)
 
     output = json.dumps(result, indent=2)
     count = len(result["protonvpn"]["servers"])
@@ -752,6 +849,7 @@ async def run_update(
     if status is not None:
         status.last_run_time = time.time()
         status.last_server_count = count
+        status.last_stats = transform_stats
         status.run_count += 1
 
 
@@ -790,10 +888,6 @@ async def main():
     replace_gluetun_servers_json_env = os.environ.get("REPLACE_GLUETUN_SERVERS_JSON", "false").lower()
     replace_gluetun_servers_json = replace_gluetun_servers_json_env in ("1", "true", "yes")
 
-    # Parse KEEP_RUNNING (default: false)
-    keep_running_env = os.environ.get("KEEP_RUNNING", "false").lower()
-    keep_running = keep_running_env in ("1", "true", "yes")
-
     # Parse STORAGE_FILEPATH (directory for output file) - REQUIRED
     storage_path = os.environ.get("STORAGE_FILEPATH")
     if not storage_path:
@@ -809,85 +903,72 @@ async def main():
     if debug and not debug_dir:
         debug_dir = os.path.join(storage_path, "debug")
 
-    if keep_running:
-        # Parse WEB_PORT (only used in KEEP_RUNNING mode, default 8080)
-        web_port_env = os.environ.get("WEB_PORT", "8080")
-        try:
-            web_port = int(web_port_env)
-        except ValueError:
-            print(f"Warning: Invalid WEB_PORT value '{web_port_env}'. Using 8080.", file=sys.stderr)
-            web_port = 8080
+    # Parse WEB_PORT (default 8080)
+    web_port_env = os.environ.get("WEB_PORT", "8080")
+    try:
+        web_port = int(web_port_env)
+    except ValueError:
+        print(f"Warning: Invalid WEB_PORT value '{web_port_env}'. Using 8080.", file=sys.stderr)
+        web_port = 8080
 
-        print("KEEP_RUNNING enabled: Will run at random intervals between 12-36 hours", file=sys.stderr)
+    stop_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, stop_event.set)
 
-        stop_event = asyncio.Event()
-        loop = asyncio.get_running_loop()
-        for sig in (signal.SIGTERM, signal.SIGINT):
-            loop.add_signal_handler(sig, stop_event.set)
+    runtime = _Status()
+    broker = _TwoFABroker()
+    web_server = await _start_web_server(web_port, runtime, broker)
 
-        runtime = _Status()
-        broker = _TwoFABroker()
-        web_server = await _start_web_server(web_port, runtime, broker)
-
-        runtime.state = "authenticating"
-        session = await _authenticate(username, password)
-        try:
-            while not stop_event.is_set():
+    runtime.state = "authenticating"
+    session = await _authenticate(username, password)
+    try:
+        while not stop_event.is_set():
+            try:
+                await run_update(
+                    session, storage_path, max_load, max_servers, include_ipv6,
+                    secure_core_filter, tor_filter, free_tier_filter,
+                    replace_gluetun_servers_json, debug, debug_dir,
+                    status=runtime, broker=broker,
+                )
+            except Exception as e:
+                runtime.state = "error"
+                runtime.last_error = str(e)
+                print(f"\nError during update: {e}", file=sys.stderr)
+                # Wait 5 minutes before retry, but still respond to stop signal
+                print("Waiting 5 minutes before retry...", file=sys.stderr)
                 try:
-                    await run_update(
-                        session, storage_path, max_load, max_servers, include_ipv6,
-                        secure_core_filter, tor_filter, free_tier_filter,
-                        replace_gluetun_servers_json, debug, debug_dir,
-                        status=runtime, broker=broker,
-                    )
-                except Exception as e:
-                    runtime.state = "error"
-                    runtime.last_error = str(e)
-                    print(f"\nError during update: {e}", file=sys.stderr)
-                    # Wait 5 minutes before retry, but still respond to stop signal
-                    print("Waiting 5 minutes before retry...", file=sys.stderr)
-                    try:
-                        await asyncio.wait_for(stop_event.wait(), timeout=300)
-                    except asyncio.TimeoutError:
-                        pass
-                    continue
-
-                if stop_event.is_set():
-                    break
-
-                # Calculate random sleep interval between 12 and 36 hours (in seconds)
-                sleep_hours = random.uniform(12, 36)
-                sleep_seconds = sleep_hours * 3600
-                next_run_time = time.time() + sleep_seconds
-                next_run_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(next_run_time))
-
-                runtime.state = "sleeping"
-                runtime.next_run_time = next_run_time
-                print(f"\nSleeping for {sleep_hours:.2f} hours. Next run at {next_run_str}", file=sys.stderr)
-                try:
-                    await asyncio.wait_for(stop_event.wait(), timeout=sleep_seconds)
+                    await asyncio.wait_for(stop_event.wait(), timeout=300)
                 except asyncio.TimeoutError:
-                    pass  # Normal timeout, continue to next run
-        finally:
-            runtime.state = "shutting_down"
-            web_server.close()
-            await web_server.wait_closed()
-            try:
-                await session.async_logout()
-            except Exception:
-                pass  # best-effort cleanup
+                    pass
+                continue
 
-        print("\nShutdown signal received, exiting...", file=sys.stderr)
-    else:
-        # Run once and exit
-        session = await _authenticate(username, password)
-        try:
-            await run_update(session, storage_path, max_load, max_servers, include_ipv6, secure_core_filter, tor_filter, free_tier_filter, replace_gluetun_servers_json, debug, debug_dir)
-        finally:
+            if stop_event.is_set():
+                break
+
+            # Calculate random sleep interval between 12 and 36 hours (in seconds)
+            sleep_hours = random.uniform(12, 36)
+            sleep_seconds = sleep_hours * 3600
+            next_run_time = time.time() + sleep_seconds
+            next_run_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(next_run_time))
+
+            runtime.state = "sleeping"
+            runtime.next_run_time = next_run_time
+            print(f"\nSleeping for {sleep_hours:.2f} hours. Next run at {next_run_str}", file=sys.stderr)
             try:
-                await session.async_logout()
-            except Exception:
-                pass  # best-effort cleanup; session may not be fully authenticated
+                await asyncio.wait_for(stop_event.wait(), timeout=sleep_seconds)
+            except asyncio.TimeoutError:
+                pass  # Normal timeout, continue to next run
+    finally:
+        runtime.state = "shutting_down"
+        web_server.close()
+        await web_server.wait_closed()
+        try:
+            await session.async_logout()
+        except Exception:
+            pass  # best-effort cleanup
+
+    print("\nShutdown signal received, exiting...", file=sys.stderr)
 
 
 if __name__ == "__main__":
