@@ -10,12 +10,12 @@ servers-proton.json will always be written to STORAGE_FILEPATH.
 | `PROTON_USERNAME`  | Yes      | Proton account username                                                                               |
 | `PROTON_PASSWORD`  | Yes      | Proton account password                                                                               |
 | `STORAGE_FILEPATH` | Yes      | Storage directory path                                          |
-| `SECURE_CORE`      | No       | Filter Secure Core servers: `include` (default), `exclude`, or `only`                                 |
-| `TOR`              | No       | Filter TOR servers: `include` (default), `exclude`, or `only`                                         |
-| `FREE_TIER`        | No       | Filter free tier servers: `include` (default), `exclude`, or `only`                                   |
-| `REPLACE_GLUETUN_SERVERS_JSON` | No | Replace `servers.json` with `servers-proton.json` (`1`/`true`/`yes` or `0`/`false`/`no`, default: `false`) |
 | `WEB_HOST`         | No       | Web dashboard bind address (default: `127.0.0.1` for localhost-only access; use `0.0.0.0` to expose publicly) |
 | `WEB_PORT`         | No       | Port for the web dashboard (default: `8080`)                                                          |
+| `REPLACE_GLUETUN_SERVERS_JSON` | No | Replace `servers.json` with `servers-proton.json` (`1`/`true`/`yes` or `0`/`false`/`no`, default: `false`) |
+| `FREE_TIER`        | No       | Filter free tier servers: `include` (default), `exclude`, or `only`                                   |
+| `SECURE_CORE`      | No       | Filter Secure Core servers: `include` (default), `exclude`, or `only`                                 |
+| `TOR`              | No       | Filter TOR servers: `include` (default), `exclude`, or `only`                                         |
 | `IP6`              | No       | IPv6 address behavior: `include` (add IPv6 IPs to server entries when available), `exclude` (default, strip IPv6 from output), or `only` (filter to servers with IPv6 and include their IPs). IPv6 data is always fetched from the API. |
 | `DEBUG`            | No       | Save raw API response to debug directory (`1`/`true`/`yes` or `0`/`false`/`no`, default: `false`)     |
 | `DEBUG_DIR`        | No       | Debug output directory (default: `STORAGE_FILEPATH/debug` when `DEBUG=true` and `DEBUG_DIR` is unset) |
