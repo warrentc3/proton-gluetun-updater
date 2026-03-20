@@ -182,6 +182,13 @@ def _fmt_uptime(start: float) -> str:
     return f"{h}h {m}m {s}s"
 
 
+def _fmt_ts(ts: float | None) -> str | None:
+    """Format a Unix timestamp as a human-readable local datetime string."""
+    if ts is None:
+        return None
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
+
+
 _HTML_PAGE = """\
 <!DOCTYPE html><html lang="en">
 <head>
@@ -193,7 +200,7 @@ _HTML_PAGE = """\
     body{background:#0f1117;color:#e2e8f0;font-family:system-ui,sans-serif;min-height:100vh;
          display:flex;flex-direction:column;align-items:center;padding:2rem 1rem}
     h1{font-size:1.4rem;font-weight:700;margin-bottom:.2rem}
-    .sub{font-size:.8rem;color:#64748b;margin-bottom:1.5rem}
+    .sub{font-size:.8rem;color:#64748b;margin-bottom:1.5rem;text-align:center}
     .card{background:#1e2130;border:1px solid #2d3348;border-radius:10px;
           padding:1.5rem;width:100%;max-width:540px;margin-bottom:1rem}
     .badge{display:inline-block;padding:.2rem .75rem;border-radius:999px;font-size:.72rem;
@@ -247,7 +254,7 @@ _HTML_PAGE = """\
     .section-heading{font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:#64748b;margin-bottom:.8rem}
     details.card>summary{list-style:none;cursor:pointer;user-select:none;margin-bottom:0}
     details.card>summary::-webkit-details-marker{display:none}
-    details.card>summary::marker{display:none}
+    details.card>summary::marker{content:''}
     details.card>summary::after{content:'\25b8';font-size:.75rem;float:right;color:#64748b;line-height:1.4}
     details.card[open]>summary{margin-bottom:.8rem}
     details.card[open]>summary::after{content:'\25be'}
@@ -288,6 +295,7 @@ _HTML_PAGE = """\
 <body>
   <button id="theme-btn" title="Switch to light mode" aria-label="Toggle theme">☀️</button>
   <h1>ProtonVPN Gluetun Updater</h1>
+  <p class="sub">Automatic ProtonVPN server list updater for Gluetun</p>
   <div class="card" id="status_card">
     <div class="grid" id="status_grid">
       <div id="status_badge" class="badge s-starting">starting</div>
@@ -356,8 +364,7 @@ _HTML_PAGE = """\
           var secs=Math.max(0,Math.round(d.next_run_time-nowSec));
           var h=Math.floor(secs/3600),m=Math.floor((secs%3600)/60);
           var nextRunText;
-          if(secs<5){nextRunText='just now';}
-          else if(secs<60){nextRunText='in '+secs+'s';}
+          if(secs<60){nextRunText='in '+secs+'s';}
           else{nextRunText=h>0?h+'h '+m+'m':m+'m';}
           set('next_run',nextRunText);
         }else{set('next_run',null);}
@@ -496,14 +503,8 @@ async def _web_handler(
                 "last_run_time": runtime.last_run_time,
                 "next_run_time": runtime.next_run_time,
                 # Backward-compatible formatted fields
-                "last_run": (
-                    time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(runtime.last_run_time))
-                    if runtime.last_run_time is not None else None
-                ),
-                "next_run": (
-                    time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(runtime.next_run_time))
-                    if runtime.next_run_time is not None else None
-                ),
+                "last_run": _fmt_ts(runtime.last_run_time),
+                "next_run": _fmt_ts(runtime.next_run_time),
                 "server_count": runtime.last_server_count,
                 "run_count": runtime.run_count,
                 "last_error": runtime.last_error,
