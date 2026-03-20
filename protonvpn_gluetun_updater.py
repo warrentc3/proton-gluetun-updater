@@ -481,11 +481,14 @@ async def _web_handler(
         elif method == "POST" and path == "/2fa":
             form = parse_qs(body.decode(errors="replace"))
             code = "".join((form.get("code") or [""])[0].split())  # strip whitespace
-            if code and broker.submit_code(code):
-                _http_redirect(writer, "/")
-            else:
+            if not re.fullmatch(r'\d{6,8}', code):
+                _http_respond(writer, "400 Bad Request", "text/plain",
+                              "Invalid 2FA code: must be 6–8 digits.")
+            elif not broker.submit_code(code):
                 _http_respond(writer, "400 Bad Request", "text/plain",
                               "Not currently waiting for a 2FA code.")
+            else:
+                _http_redirect(writer, "/")
         else:
             _http_respond(writer, "404 Not Found", "text/plain", "Not found")
 
