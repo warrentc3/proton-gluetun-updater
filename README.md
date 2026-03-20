@@ -1,40 +1,15 @@
-# protonvpn-gluetun-updater
+Companion container for [Gluetun](https://github.com/qdm12/gluetun) to fetch the Proton VPN server list. Authenticates directly against the Proton API (SRP) — no dependency on the Proton VPN desktop app.
 
-Fetch the Proton VPN server list and export it as a [Gluetun](https://github.com/qdm12/gluetun) custom provider configuration file.
-Authenticates directly against the Proton API (SRP) — no dependency on the Proton VPN desktop app.
+REPLACE_GLUETUN_SERVERS_JSON=true will overwrite servers.json if you set the STORAGE_FILEPATH to use the same mount that gluetun uses.
+servers-proton.json will always be written to STORAGE_FILEPATH.
 
-## Usage
-
-### Docker Run
-```bash
-docker run -d \
-  -e PROTON_USERNAME=user \
-  -e PROTON_PASSWORD=pass \
-  -e STORAGE_FILEPATH=/gluetun \
-  -e WEB_HOST=0.0.0.0 \
-  -v /path/to/gluetun:/gluetun \
-  -p 8080:8080 \
-  ghcr.io/warrentc3/proton-gluetun-updater:latest
-```
-
-### Docker Compose
-Use the included [`docker-compose.yml`](docker-compose.yml):
-
-1. Copy `.env.example` to `.env` and fill in your Proton credentials.
-2. Edit `docker-compose.yml` to set your volume paths.
-3. Run:
-
-```bash
-docker compose up
-```
 
 ## Environment variables
-
 | Variable           | Required | Description                                                                                           |
 | ------------------ | -------- | ----------------------------------------------------------------------------------------------------- |
 | `PROTON_USERNAME`  | Yes      | Proton account username                                                                               |
 | `PROTON_PASSWORD`  | Yes      | Proton account password                                                                               |
-| `STORAGE_FILEPATH` | Yes      | Storage directory path (output file: `servers-proton.json`)                                           |
+| `STORAGE_FILEPATH` | Yes      | Storage directory path                                          |
 | `SECURE_CORE`      | No       | Filter Secure Core servers: `include` (default), `exclude`, or `only`                                 |
 | `TOR`              | No       | Filter TOR servers: `include` (default), `exclude`, or `only`                                         |
 | `FREE_TIER`        | No       | Filter free tier servers: `include` (default), `exclude`, or `only`                                   |
@@ -44,6 +19,19 @@ docker compose up
 | `IP6`              | No       | IPv6 address behavior: `include` (add IPv6 IPs to server entries when available), `exclude` (default, strip IPv6 from output), or `only` (filter to servers with IPv6 and include their IPs). IPv6 data is always fetched from the API. |
 | `DEBUG`            | No       | Save raw API response to debug directory (`1`/`true`/`yes` or `0`/`false`/`no`, default: `false`)     |
 | `DEBUG_DIR`        | No       | Debug output directory (default: `STORAGE_FILEPATH/debug` when `DEBUG=true` and `DEBUG_DIR` is unset) |
+
+
+### Filtering and sorting
+Servers are sorted by: secure_core first, then TOR, then alphabetically by country and city, then by **load ascending** (lower load = better).
+The filtering pipeline works as follows:
+
+1. **Sort** all logical servers by priority: secure_core first, then TOR, then alphabetically by country, city, and load (ascending)
+2. **Filter by server type** — apply `SECURE_CORE`, `TOR`, `FREE_TIER`, and `IP6` filters:
+   - `include` (default): include these servers in the output
+   - `exclude`: exclude these servers from the output
+   - `only`: only include these servers (exclude all others)
+
+Without any filter, all servers are exported (sorted by secure_core, TOR, country, city, load).
 
 ## Web Dashboard
 
@@ -70,27 +58,6 @@ When `DEBUG=true`, the script saves the raw API response from ProtonVPN before t
 - Preserving historical server data
 
 The debug output is saved as `serverlist.{EPOCHTIME}.tar.gz` in the debug directory. The uncompressed JSON is automatically removed after compression to save space.
-
-### Filtering and sorting
-
-Servers are sorted by: secure_core first, then TOR, then alphabetically by country and city, then by **load ascending** (lower load = better).
-
-The filtering pipeline works as follows:
-
-1. **Sort** all logical servers by priority: secure_core first, then TOR, then alphabetically by country, city, and load (ascending)
-2. **Filter by server type** — apply `SECURE_CORE`, `TOR`, `FREE_TIER`, and `IP6` filters:
-   - `include` (default): include these servers in the output
-   - `exclude`: exclude these servers from the output
-   - `only`: only include these servers (exclude all others)
-
-All filters are optional and can be combined. For example:
-- `SECURE_CORE=only TOR=exclude` — only secure_core servers, excluding any with TOR
-- `TOR=only` — only TOR servers
-- `FREE_TIER=exclude` — exclude all free tier servers
-- `FREE_TIER=only` — only free tier servers
-- `IP6=only` — only servers with IPv6 addresses
-
-Without any filter, all servers are exported (sorted by secure_core, TOR, country, city, load).
 
 ## License
 
