@@ -342,15 +342,24 @@ _HTML_PAGE = """\
         b.textContent=displayState.replace(/_/g,' ');
         b.className='badge s-'+state;
         set('uptime',d.uptime);
+        var nowSec=Date.now()/1000;
         if(d.last_run_time!=null){
-          var lsecs=Math.max(0,Math.round(Date.now()/1000-d.last_run_time));
+          var lsecs=Math.max(0,Math.round(nowSec-d.last_run_time));
           var lh=Math.floor(lsecs/3600),lm=Math.floor((lsecs%3600)/60);
-          set('last_run',(lh>0?lh+'h '+lm+'m':lm+'m')+' ago');
+          var lastRunText;
+          if(lsecs<5){lastRunText='just now';}
+          else if(lsecs<60){lastRunText=lsecs+'s ago';}
+          else{lastRunText=(lh>0?lh+'h '+lm+'m':lm+'m')+' ago';}
+          set('last_run',lastRunText);
         }else{set('last_run',null);}
         if(d.next_run_time!=null){
-          var secs=Math.max(0,Math.round(d.next_run_time-Date.now()/1000));
+          var secs=Math.max(0,Math.round(d.next_run_time-nowSec));
           var h=Math.floor(secs/3600),m=Math.floor((secs%3600)/60);
-          set('next_run',h>0?h+'h '+m+'m':m+'m');
+          var nextRunText;
+          if(secs<5){nextRunText='just now';}
+          else if(secs<60){nextRunText='in '+secs+'s';}
+          else{nextRunText=h>0?h+'h '+m+'m':m+'m';}
+          set('next_run',nextRunText);
         }else{set('next_run',null);}
         set('server_count',d.server_count);
         var eb=document.getElementById('err');
@@ -847,7 +856,7 @@ def _atomic_write(path: str, content: str) -> None:
     dir_path = os.path.dirname(path)
     fd, tmp_path = tempfile.mkstemp(dir=dir_path, suffix=".tmp")
     try:
-        with os.fdopen(fd, "w") as f:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(content)
         os.replace(tmp_path, path)
     except Exception:
