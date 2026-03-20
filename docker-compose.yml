@@ -7,9 +7,9 @@ services:
       - /path/to/debug:/debug # Optional: Set this to a directory to store debug logs if DEBUG is enabled.  When DEBUG=true and DEBUG_DIR is unset, defaults to STORAGE_FILEPATH/debug subdirectory.
     ports:
       - "8080:8080" # OPTIONAL: Web dashboard port. Change left side to remap host port.
+    env_file:
+      - .env
     environment:
-      PROTON_USERNAME: username # MANDATORY: Set this to your Proton account username
-      PROTON_PASSWORD: password # MANDATORY: Set this to your Proton account password
       STORAGE_FILEPATH: /gluetun # MANDATORY: Storage directory path (output file: servers-proton.json)
       SECURE_CORE: include # OPTIONAL: Filter Secure Core servers: include (default), exclude, or only
       TOR: include # OPTIONAL: Filter TOR servers: include (default), exclude, or only
@@ -18,5 +18,5 @@ services:
       WEB_HOST: 0.0.0.0 # OPTIONAL: Dashboard bind address. Defaults to 127.0.0.1 (localhost-only). Use 0.0.0.0 to expose publicly.
       WEB_PORT: 8080 # OPTIONAL: Port for the web dashboard. Defaults to 8080 if not set.
       IP6: exclude # OPTIONAL: IPv6 behavior: exclude (default), include, or only
-      DEBUG: true # OPTIONAL: Enable debug logging set to true.  Defaults to false if not set. 
+      DEBUG: false # OPTIONAL: Enable debug logging. Defaults to false if not set.
       DEBUG_DIR: /debug # OPTIONAL: Set this to a directory to store debug logs if DEBUG is enabled.  When DEBUG=true and DEBUG_DIR is unset, defaults to STORAGE_FILEPATH/debug subdirectory.
