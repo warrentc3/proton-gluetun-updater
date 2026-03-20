@@ -1,166 +1,94 @@
 # protonvpn-gluetun-updater
 
-Fetch the Proton VPN server list and export it as a [Gluetun](https://github.com/qdm12/gluetun) custom provider `servers.json` file.
-
+Fetch the Proton VPN server list and export it as a [Gluetun](https://github.com/qdm12/gluetun) custom provider configuration file.
 Authenticates directly against the Proton API (SRP) — no dependency on the Proton VPN desktop app.
-
-## How it works
-
-The script authenticates against the Proton API via SRP, then fetches the server list from the `/vpn/v1/logicals` endpoint.
-
-The Proton API returns a list of **logical servers**, each containing one or more **physical servers** (nodes):
-
-```json
-{
-  "LogicalServers": [
-    {
-      "Name": "CH#485",
-      "ExitCountry": "CH",
-      "City": "Zurich",
-      "Domain": "node-ch-9999.protonvpn.net",
-      "Features": 12,
-      "Load": 23,
-      "Score": 1.0234,
-      "Status": 1,
-      "Servers": [
-        {
-          "EntryIP": "146.70.226.194",
-          "Domain": "node-ch-9999.protonvpn.net",
-          "X25519PublicKey": "JuU8atNk6x75cZiCI8TuYnnDfFs4MUSZZomSWKKl1Rs="
-        }
-      ]
-    }
-  ]
-}
-```
-
-The script iterates over each logical server and its physical servers, and produces two Gluetun entries per physical server:
-
-- A **WireGuard** entry (if `X25519PublicKey` is present)
-- An **OpenVPN** entry
-
-The `Features` field is a bitmask decoded as follows:
-
-| Bit | Value | Feature |
-|---|---|---|
-| 0 | 1 | Secure Core |
-| 1 | 2 | TOR |
-| 2 | 4 | P2P (`port_forward`) |
-| 3 | 8 | Streaming (`stream`) |
-| 4 | 16 | IPv6 |
-
-For example, `"Features": 12` = P2P (4) + Streaming (8) → `"port_forward": true, "stream": true`.
-
-The resulting Gluetun output for the example above:
-
-```json
-{
-  "version": 1,
-  "protonvpn": {
-    "version": 4,
-    "timestamp": 1721997873,
-    "servers": [
-      {
-        "vpn": "wireguard",
-        "country": "Switzerland",
-        "city": "Zurich",
-        "server_name": "CH#485",
-        "hostname": "node-ch-9999.protonvpn.net",
-        "wgpubkey": "JuU8atNk6x75cZiCI8TuYnnDfFs4MUSZZomSWKKl1Rs=",
-        "tcp": true,
-        "udp": true,
-        "stream": true,
-        "port_forward": true,
-        "ips": ["146.70.226.194"]
-      },
-      {
-        "vpn": "openvpn",
-        "country": "Switzerland",
-        "city": "Zurich",
-        "server_name": "CH#485",
-        "hostname": "node-ch-9999.protonvpn.net",
-        "tcp": true,
-        "udp": true,
-        "stream": true,
-        "port_forward": true,
-        "ips": ["146.70.226.194"]
-      }
-    ]
-  }
-}
-```
 
 ## Usage
 
-### Python
-
+### Docker Run
 ```bash
-pip install -r requirements.txt
-
-# Interactive (prompts for credentials and 2FA code)
-python protonvpn_gluetun_updater.py > servers.json
-
-# Via environment variables
-PROTON_USERNAME=user \
-PROTON_PASSWORD=pass \
-PROTON_2FA=123456 \
-python protonvpn_gluetun_updater.py > servers.json
-```
-
-### Docker
-
-```bash
-docker build -t protonvpn-gluetun-updater .
-
-docker run --rm \
+docker run -d \
   -e PROTON_USERNAME=user \
   -e PROTON_PASSWORD=pass \
-  -e PROTON_2FA=123456 \
-  -e OUTPUT_FILE=/out/servers.json \
-  -v /path/to/output:/out \
-  protonvpn-gluetun-updater
-
-# Only servers with load <= 50% and keep the 100 best
-docker run --rm \
-  -e PROTON_USERNAME=user \
-  -e PROTON_PASSWORD=pass \
-  -e PROTON_2FA=123456 \
-  -e MAX_LOAD=50 \
-  -e MAX_SERVERS=100 \
-  -e OUTPUT_FILE=/out/servers.json \
-  -v /path/to/output:/out \
-  protonvpn-gluetun-updater
+  -e STORAGE_FILEPATH=/gluetun \
+  -e WEB_HOST=0.0.0.0 \
+  -v /path/to/gluetun:/gluetun \
+  -p 8080:8080 \
+  ghcr.io/warrentc3/proton-gluetun-updater:latest
 ```
 
-> **Note:** When using Docker, the `PROTON_2FA` environment variable is required if your account has 2FA enabled (interactive prompt is not available).
+### Docker Compose
+Use the included [`docker-compose.yml`](docker-compose.yml):
 
-### Filtering and scoring
+```bash
+docker compose up
+```
 
-Each logical server returned by the Proton API includes two fields used for ranking:
-
-- **`Load`** (0–100) — current usage percentage of the server
-- **`Score`** (float, lower = better) — internal Proton metric that combines server load and geographic proximity to the user
-
-The filtering pipeline works as follows:
-
-1. **Sort** all logical servers by `Score` (ascending — best servers first)
-2. **Filter by load** — if `MAX_LOAD` is set, discard any server where `Load > MAX_LOAD`
-3. **Truncate** — if `MAX_SERVERS` is set, keep only the first N servers from the sorted list
-
-Both filters are optional and can be combined. For example, `MAX_LOAD=50 MAX_SERVERS=100` first removes all servers above 50% load, then keeps the 100 best-scored among the remaining ones.
-
-Without any filter, all servers are exported (sorted by score).
+Edit the compose file to set your credentials and paths.
 
 ## Environment variables
 
-| Variable | Required | Description |
-|---|---|---|
-| `PROTON_USERNAME` | Yes | Proton account username |
-| `PROTON_PASSWORD` | Yes | Proton account password |
-| `PROTON_2FA` | No | TOTP code (required if 2FA is enabled on the account) |
-| `OUTPUT_FILE` | No | Output file path (defaults to stdout) |
-| `MAX_LOAD` | No | Only include servers with load <= this value (0-100) |
-| `MAX_SERVERS` | No | Limit to the N best servers, sorted by score |
+| Variable           | Required | Description                                                                                           |
+| ------------------ | -------- | ----------------------------------------------------------------------------------------------------- |
+| `PROTON_USERNAME`  | Yes      | Proton account username                                                                               |
+| `PROTON_PASSWORD`  | Yes      | Proton account password                                                                               |
+| `STORAGE_FILEPATH` | Yes      | Storage directory path (output file: `servers-proton.json`)                                           |
+| `SECURE_CORE`      | No       | Filter Secure Core servers: `include` (default), `exclude`, or `only`                                 |
+| `TOR`              | No       | Filter TOR servers: `include` (default), `exclude`, or `only`                                         |
+| `FREE_TIER`        | No       | Filter free tier servers: `include` (default), `exclude`, or `only`                                   |
+| `REPLACE_GLUETUN_SERVERS_JSON` | No | Replace `servers.json` with `servers-proton.json` (`1`/`true`/`yes` or `0`/`false`/`no`, default: `false`) |
+| `WEB_HOST`         | No       | Web dashboard bind address (default: `127.0.0.1` for localhost-only access; use `0.0.0.0` to expose publicly) |
+| `WEB_PORT`         | No       | Port for the web dashboard (default: `8080`)                                                          |
+| `IP6`              | No       | IPv6 address behavior: `include` (add IPv6 IPs to server entries when available), `exclude` (default, strip IPv6 from output), or `only` (filter to servers with IPv6 and include their IPs). IPv6 data is always fetched from the API. |
+| `DEBUG`            | No       | Save raw API response to debug directory (`1`/`true`/`yes` or `0`/`false`/`no`, default: `false`)     |
+| `DEBUG_DIR`        | No       | Debug output directory (default: `STORAGE_FILEPATH/debug` when `DEBUG=true` and `DEBUG_DIR` is unset) |
+
+## Web Dashboard
+
+A lightweight web dashboard is always available on `WEB_PORT` (default `8080`). No extra dependencies are required — it uses Python's built-in `asyncio`.
+
+**Endpoints:**
+- `GET /` — status page with live stats
+- `GET /status` — JSON status (polled every 10 s by the page)
+- `POST /2fa` — submit a TOTP code when 2FA is required
+
+**Stats shown:** current state (starting / authenticating / running / sleeping / waiting 2FA / error), uptime, total run count, last run time, next run time, servers written, and last error. After each successful run a **Last Run Statistics** table is shown with total vs in-output counts across 8 categories (physical servers, logical servers, IPv6, TOR, secure core, free, P2P, streaming).
+
+**2FA:** The 2FA input card is always visible. When a TOTP code is required it activates with an orange border; otherwise it is shown in a muted/disabled state. Invalid codes display an inline error and allow retry without restarting the container.
+
+**Theme:** A light/dark mode toggle is available in the top-right corner. The preference is saved to `localStorage` and defaults to dark mode.
+
+> **Security Note:** The dashboard has no authentication and includes a 2FA submission endpoint. By default it binds to `127.0.0.1` (localhost-only) for safety. To expose it in a Docker container, set `WEB_HOST=0.0.0.0` and control access via Docker port binding (`-p 127.0.0.1:8080:8080`) or a reverse proxy with authentication.
+
+## Debug Mode
+
+When `DEBUG=true`, the script saves the raw API response from ProtonVPN before transformation. This is useful for:
+- Troubleshooting transformation issues
+- Analyzing changes in the ProtonVPN API response
+- Preserving historical server data
+
+The debug output is saved as `serverlist.{EPOCHTIME}.tar.gz` in the debug directory. The uncompressed JSON is automatically removed after compression to save space.
+
+### Filtering and sorting
+
+Servers are sorted by: secure_core first, then TOR, then alphabetically by country and city, then by **load ascending** (lower load = better).
+
+The filtering pipeline works as follows:
+
+1. **Sort** all logical servers by priority: secure_core first, then TOR, then alphabetically by country, city, and load (ascending)
+2. **Filter by server type** — apply `SECURE_CORE`, `TOR`, `FREE_TIER`, and `IP6` filters:
+   - `include` (default): include these servers in the output
+   - `exclude`: exclude these servers from the output
+   - `only`: only include these servers (exclude all others)
+
+All filters are optional and can be combined. For example:
+- `SECURE_CORE=only TOR=exclude` — only secure_core servers, excluding any with TOR
+- `TOR=only` — only TOR servers
+- `FREE_TIER=exclude` — exclude all free tier servers
+- `FREE_TIER=only` — only free tier servers
+- `IP6=only` — only servers with IPv6 addresses
+
+Without any filter, all servers are exported (sorted by secure_core, TOR, country, city, load).
 
 ## License
 
