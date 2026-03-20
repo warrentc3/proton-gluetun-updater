@@ -268,7 +268,8 @@ _HTML_PAGE = """\
     body.light .tfa{background:#fff;border-color:#cbd5e1}
     body.light .tfa h2{color:#475569}
     body.light .tfa p{color:#475569}
-    body.light .tfa-badge{color:#475569}
+    body.light .tfa-inactive{color:#475569}
+    body.light .tfa-waiting{color:#fdba74}
     body.light .tfa-in{background:#f8fafc;border-color:#cbd5e1;color:#475569}
     body.light .tfa.active .tfa-in{border-color:#94a3b8;color:#1e293b}
     body.light .tfa-btn{background:#e2e8f0;color:#475569}
@@ -336,8 +337,9 @@ _HTML_PAGE = """\
         var d=await r.json();
         var b=document.getElementById('status_badge');
         var state=d.state;
-        if(state==='waiting_2fa')state='authenticating';
-        b.textContent=state.replace(/_/g,' ');
+        var displayState=state;
+        if(state==='waiting_2fa')displayState='waiting for 2FA';
+        b.textContent=displayState.replace(/_/g,' ');
         b.className='badge s-'+state;
         set('uptime',d.uptime);
         if(d.last_run_time!=null){
@@ -378,7 +380,7 @@ _HTML_PAGE = """\
           ti.disabled=false;tb.disabled=false;
           tfab.textContent='waiting';
           tfab.className='tfa-badge tfa-waiting';
-          td.textContent='Enter your 6-digit authenticator code to continue.';
+          td.textContent='Enter your 6- to 8-digit authenticator code to continue.';
           ti.focus();
         }else{
           tc.classList.remove('active');
@@ -484,6 +486,15 @@ async def _web_handler(
                 "uptime": _fmt_uptime(runtime.start_time),
                 "last_run_time": runtime.last_run_time,
                 "next_run_time": runtime.next_run_time,
+                # Backward-compatible formatted fields
+                "last_run": (
+                    time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(runtime.last_run_time))
+                    if runtime.last_run_time is not None else None
+                ),
+                "next_run": (
+                    time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(runtime.next_run_time))
+                    if runtime.next_run_time is not None else None
+                ),
                 "server_count": runtime.last_server_count,
                 "run_count": runtime.run_count,
                 "last_error": runtime.last_error,
