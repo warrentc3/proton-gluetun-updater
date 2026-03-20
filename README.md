@@ -20,11 +20,13 @@ docker run -d \
 ### Docker Compose
 Use the included [`docker-compose.yml`](docker-compose.yml):
 
+1. Copy `.env.example` to `.env` and fill in your Proton credentials.
+2. Edit `docker-compose.yml` to set your volume paths.
+3. Run:
+
 ```bash
 docker compose up
 ```
-
-Edit the compose file to set your credentials and paths.
 
 ## Environment variables
 

@@ -64,7 +64,7 @@ def load_country_names() -> dict:
     countries_file = script_dir / "countries.json"
     
     try:
-        with open(countries_file, 'r') as f:
+        with open(countries_file, 'r', encoding='utf-8') as f:
             return json.load(f)
     except FileNotFoundError:
         print(f"Error: countries.json not found at {countries_file}", file=sys.stderr)
