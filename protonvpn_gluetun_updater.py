@@ -64,7 +64,7 @@ def load_country_names() -> dict:
     countries_file = script_dir / "countries.json"
     
     try:
-        with open(countries_file, 'r') as f:
+        with open(countries_file, 'r', encoding='utf-8') as f:
             return json.load(f)
     except FileNotFoundError:
         print(f"Error: countries.json not found at {countries_file}", file=sys.stderr)
@@ -173,12 +173,6 @@ class _TwoFABroker:
         self.message = ""  # Clear error message when user submits a new code
         self._queue.put_nowait(code)
         return True
-
-
-def _fmt_ts(ts: float | None) -> str | None:
-    if ts is None:
-        return None
-    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
 
 
 def _fmt_uptime(start: float) -> str:
@@ -886,7 +880,7 @@ async def run_update(
         tar_filepath = debug_path / tar_filename
         
         # Write JSON file
-        with open(json_filepath, 'w') as f:
+        with open(json_filepath, 'w', encoding='utf-8') as f:
             json.dump(api_data, f, indent=2)
         print(f"Debug: Saved raw API response to {json_filepath}", file=sys.stderr)
         
