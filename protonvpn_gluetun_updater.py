@@ -175,17 +175,18 @@ class _TwoFABroker:
         return True
 
 
-def _fmt_ts(ts: float | None) -> str | None:
-    if ts is None:
-        return None
-    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
-
-
 def _fmt_uptime(start: float) -> str:
     secs = int(time.time() - start)
     h, rem = divmod(secs, 3600)
     m, s = divmod(rem, 60)
     return f"{h}h {m}m {s}s"
+
+
+def _fmt_ts(ts: float | None) -> str | None:
+    """Format a Unix timestamp as a human-readable local datetime string."""
+    if ts is None:
+        return None
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
 
 
 _HTML_PAGE = """\
@@ -199,7 +200,7 @@ _HTML_PAGE = """\
     body{background:#0f1117;color:#e2e8f0;font-family:system-ui,sans-serif;min-height:100vh;
          display:flex;flex-direction:column;align-items:center;padding:2rem 1rem}
     h1{font-size:1.4rem;font-weight:700;margin-bottom:.2rem}
-    .sub{font-size:.8rem;color:#64748b;margin-bottom:1.5rem}
+    .sub{font-size:.8rem;color:#64748b;margin-bottom:1.5rem;text-align:center}
     .card{background:#1e2130;border:1px solid #2d3348;border-radius:10px;
           padding:1.5rem;width:100%;max-width:540px;margin-bottom:1rem}
     .badge{display:inline-block;padding:.2rem .75rem;border-radius:999px;font-size:.72rem;
@@ -222,6 +223,10 @@ _HTML_PAGE = """\
     .tfa.active{border-color:#92400e}
     .tfa h2{font-size:1rem;color:#94a3b8;margin-bottom:.4rem}
     .tfa.active h2{color:#fdba74}
+    .tfa-badge{display:inline-block;padding:.2rem .75rem;border-radius:999px;font-size:.72rem;
+                font-weight:700;text-transform:uppercase;letter-spacing:.06em;margin-bottom:.8rem}
+    .tfa-inactive{background:#1e293b;color:#64748b}
+    .tfa-waiting{background:#451a03;color:#fdba74;animation:pulse 1s ease-in-out infinite}
     .tfa p{font-size:.8rem;color:#64748b;margin-bottom:.8rem}
     .tfa.active p{color:#94a3b8}
     .tfa-msg{font-size:.78rem;color:#fca5a5;margin-bottom:.6rem}
@@ -246,6 +251,13 @@ _HTML_PAGE = """\
     .stats-tbl .match{color:#86efac}
     .stats-tbl .diff{color:#fca5a5}
     .stats-notes{margin-top:.6rem;font-size:.72rem;color:#64748b}
+    .section-heading{font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:#64748b;margin-bottom:.8rem}
+    details.card>summary{list-style:none;cursor:pointer;user-select:none;margin-bottom:0}
+    details.card>summary::-webkit-details-marker{display:none}
+    details.card>summary::marker{content:''}
+    details.card>summary::after{content:'\\25b8';font-size:.75rem;float:right;color:#64748b;line-height:1.4}
+    details.card[open]>summary{margin-bottom:.8rem}
+    details.card[open]>summary::after{content:'\\25be'}
     .filter-grid{display:grid;grid-template-columns:1fr 1fr;gap:.6rem 1.5rem;margin-top:.2rem}
     .filter-item label{display:block;font-size:.68rem;color:#64748b;text-transform:uppercase;letter-spacing:.08em;margin-bottom:.15rem}
     .filter-item .fval{font-size:.8rem;font-family:monospace;color:#e2e8f0}
@@ -263,12 +275,16 @@ _HTML_PAGE = """\
     body.light .tfa{background:#fff;border-color:#cbd5e1}
     body.light .tfa h2{color:#475569}
     body.light .tfa p{color:#475569}
+    body.light .tfa-inactive{color:#475569}
+    body.light .tfa-waiting{color:#fdba74}
     body.light .tfa-in{background:#f8fafc;border-color:#cbd5e1;color:#475569}
     body.light .tfa.active .tfa-in{border-color:#94a3b8;color:#1e293b}
     body.light .tfa-btn{background:#e2e8f0;color:#475569}
     body.light .stats-tbl th{color:#475569;border-bottom-color:#cbd5e1}
     body.light .stats-tbl td{color:#1e293b;border-bottom-color:#e2e8f0}
     body.light .stats-notes{color:#475569}
+    body.light .section-heading{color:#475569}
+    body.light details.card>summary::after{color:#475569}
     body.light .filter-item label{color:#475569}
     body.light .filter-item .fval{color:#1e293b}
     body.light #theme-btn{border-color:#cbd5e1;color:#475569}
@@ -279,40 +295,21 @@ _HTML_PAGE = """\
 <body>
   <button id="theme-btn" title="Switch to light mode" aria-label="Toggle theme">☀️</button>
   <h1>ProtonVPN Gluetun Updater</h1>
-  <p class="sub">Server list refresh service</p>
-  <div class="card">
-    <div id="badge" class="badge s-starting">starting</div>
-    <div class="grid">
+  <p class="sub">Automatic ProtonVPN server list updater for Gluetun</p>
+  <div class="card" id="status_card">
+    <div class="grid" id="status_grid">
+      <div id="status_badge" class="badge s-starting">starting</div>
       <div class="stat"><label>Uptime</label><span class="val" id="uptime">&#x2014;</span></div>
-      <div class="stat"><label>Total Runs</label><span class="val" id="run_count">&#x2014;</span></div>
       <div class="stat"><label>Last Run</label><span class="val" id="last_run">&#x2014;</span></div>
       <div class="stat"><label>Next Run</label><span class="val" id="next_run">&#x2014;</span></div>
       <div class="stat"><label>Servers Written</label><span class="val" id="server_count">&#x2014;</span></div>
     </div>
     <div id="err" class="err" style="display:none"></div>
   </div>
-  <div class="card">
-    <div style="font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:#64748b;margin-bottom:.8rem">Filter Configuration</div>
-    <div class="filter-grid">
-      <div class="filter-item"><label>IP6</label><span class="fval" id="cfg_ip6">&#x2014;</span></div>
-      <div class="filter-item"><label>Secure Core</label><span class="fval" id="cfg_secure_core">&#x2014;</span></div>
-      <div class="filter-item"><label>TOR</label><span class="fval" id="cfg_tor">&#x2014;</span></div>
-      <div class="filter-item"><label>Free Tier</label><span class="fval" id="cfg_free_tier">&#x2014;</span></div>
-      <div class="filter-item"><label>Replace JSON</label><span class="fval" id="cfg_replace_json">&#x2014;</span></div>
-      <div class="filter-item"><label>Debug</label><span class="fval" id="cfg_debug">&#x2014;</span></div>
-    </div>
-  </div>
-  <div class="card" id="stats_card" style="display:none">
-    <div style="font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:#64748b;margin-bottom:.8rem">Last Run Statistics</div>
-    <table class="stats-tbl">
-      <thead><tr><th>Category</th><th>Total</th><th>In Output</th></tr></thead>
-      <tbody id="stats_body"></tbody>
-    </table>
-    <div id="stats_notes" class="stats-notes"></div>
-  </div>
   <div class="tfa" id="tfa_card">
     <h2>&#x1F511; 2FA</h2>
-    <p id="tfa_desc">2FA is not currently required.</p>
+    <div id="tfa_badge" class="tfa-badge tfa-inactive">inactive</div>
+    <p id="tfa_desc">Not currently required</p>
     <div id="tfa_msg" class="tfa-msg" style="display:none"></div>
     <form class="tfa-form" method="POST" action="/2fa" id="tfa_form">
       <input class="tfa-in" type="text" name="code" maxlength="8" inputmode="numeric"
@@ -320,6 +317,25 @@ _HTML_PAGE = """\
       <button class="tfa-btn" type="submit" id="tfa_btn" disabled>Submit</button>
     </form>
   </div>
+  <details class="card" id="filter_card">
+    <summary id="filter_heading" class="section-heading">Filter Configuration</summary>
+    <div class="filter-grid" id="filter_grid">
+      <div class="filter-item" id="fi_ip6"><label id="lbl_ip6">IP6</label><span class="fval" id="cfg_ip6" aria-labelledby="lbl_ip6">&#x2014;</span></div>
+      <div class="filter-item" id="fi_secure_core"><label id="lbl_secure_core">Secure Core</label><span class="fval" id="cfg_secure_core" aria-labelledby="lbl_secure_core">&#x2014;</span></div>
+      <div class="filter-item" id="fi_tor"><label id="lbl_tor">TOR</label><span class="fval" id="cfg_tor" aria-labelledby="lbl_tor">&#x2014;</span></div>
+      <div class="filter-item" id="fi_free_tier"><label id="lbl_free_tier">Free Tier</label><span class="fval" id="cfg_free_tier" aria-labelledby="lbl_free_tier">&#x2014;</span></div>
+      <div class="filter-item" id="fi_replace_json"><label id="lbl_replace_json">Replace JSON</label><span class="fval" id="cfg_replace_json" aria-labelledby="lbl_replace_json">&#x2014;</span></div>
+      <div class="filter-item" id="fi_debug"><label id="lbl_debug">Debug</label><span class="fval" id="cfg_debug" aria-labelledby="lbl_debug">&#x2014;</span></div>
+    </div>
+  </details>
+  <details class="card" id="stats_card" style="display:none">
+    <summary id="stats_heading" class="section-heading">Last Run Statistics</summary>
+    <table class="stats-tbl">
+      <thead><tr><th>Category</th><th>Total</th><th>In Output</th></tr></thead>
+      <tbody id="stats_body"></tbody>
+    </table>
+    <div id="stats_notes" class="stats-notes"></div>
+  </details>
   <footer>Auto-refreshes every 10 s &mdash; last: <span id="ts">never</span></footer>
   <script>
     function set(id,v){var e=document.getElementById(id);if(e)e.textContent=v!=null?v:'\u2014';}
@@ -327,11 +343,31 @@ _HTML_PAGE = """\
       try{
         var r=await fetch('/status');if(!r.ok)return;
         var d=await r.json();
-        var b=document.getElementById('badge');
-        b.textContent=d.state.replace(/_/g,' ');
-        b.className='badge s-'+d.state;
-        set('uptime',d.uptime);set('run_count',d.run_count);
-        set('last_run',d.last_run);set('next_run',d.next_run);
+        var b=document.getElementById('status_badge');
+        var state=d.state;
+        var displayState=state;
+        if(state==='waiting_2fa')displayState='waiting for 2FA';
+        b.textContent=displayState.replace(/_/g,' ');
+        b.className='badge s-'+state;
+        set('uptime',d.uptime);
+        var nowSec=Date.now()/1000;
+        if(d.last_run_time!=null){
+          var lsecs=Math.max(0,Math.round(nowSec-d.last_run_time));
+          var lh=Math.floor(lsecs/3600),lm=Math.floor((lsecs%3600)/60);
+          var lastRunText;
+          if(lsecs<5){lastRunText='just now';}
+          else if(lsecs<60){lastRunText=lsecs+'s ago';}
+          else{lastRunText=(lh>0?lh+'h '+lm+'m':lm+'m')+' ago';}
+          set('last_run',lastRunText);
+        }else{set('last_run',null);}
+        if(d.next_run_time!=null){
+          var secs=Math.max(0,Math.round(d.next_run_time-nowSec));
+          var h=Math.floor(secs/3600),m=Math.floor((secs%3600)/60);
+          var nextRunText;
+          if(secs<60){nextRunText='in '+secs+'s';}
+          else{nextRunText=h>0?h+'h '+m+'m':m+'m';}
+          set('next_run',nextRunText);
+        }else{set('next_run',null);}
         set('server_count',d.server_count);
         var eb=document.getElementById('err');
         if(d.last_error){eb.style.display='block';eb.textContent=d.last_error;}
@@ -354,15 +390,20 @@ _HTML_PAGE = """\
         var ti=document.getElementById('tfa_input');
         var tb=document.getElementById('tfa_btn');
         var td=document.getElementById('tfa_desc');
+        var tfab=document.getElementById('tfa_badge');
         if(d.waiting_2fa){
           tc.classList.add('active');
           ti.disabled=false;tb.disabled=false;
-          td.textContent='Enter your 6-digit authenticator code to continue.';
+          tfab.textContent='waiting';
+          tfab.className='tfa-badge tfa-waiting';
+          td.textContent='Enter your 6- to 8-digit authenticator code to continue.';
           ti.focus();
         }else{
           tc.classList.remove('active');
           ti.disabled=true;tb.disabled=true;ti.value='';
-          td.textContent='2FA is not currently required.';
+          tfab.textContent='inactive';
+          tfab.className='tfa-badge tfa-inactive';
+          td.textContent='Not currently required';
         }
         var tm=document.getElementById('tfa_msg');
         if(d.twofa_message){tm.style.display='block';tm.textContent=d.twofa_message;}
@@ -459,6 +500,9 @@ async def _web_handler(
             payload = json.dumps({
                 "state": runtime.state,
                 "uptime": _fmt_uptime(runtime.start_time),
+                "last_run_time": runtime.last_run_time,
+                "next_run_time": runtime.next_run_time,
+                # Backward-compatible formatted fields
                 "last_run": _fmt_ts(runtime.last_run_time),
                 "next_run": _fmt_ts(runtime.next_run_time),
                 "server_count": runtime.last_server_count,
@@ -813,7 +857,7 @@ def _atomic_write(path: str, content: str) -> None:
     dir_path = os.path.dirname(path)
     fd, tmp_path = tempfile.mkstemp(dir=dir_path, suffix=".tmp")
     try:
-        with os.fdopen(fd, "w") as f:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(content)
         os.replace(tmp_path, path)
     except Exception:
@@ -857,7 +901,7 @@ async def run_update(
         tar_filepath = debug_path / tar_filename
         
         # Write JSON file
-        with open(json_filepath, 'w') as f:
+        with open(json_filepath, 'w', encoding='utf-8') as f:
             json.dump(api_data, f, indent=2)
         print(f"Debug: Saved raw API response to {json_filepath}", file=sys.stderr)
         
