@@ -255,9 +255,9 @@ _HTML_PAGE = """\
     details.card>summary{list-style:none;cursor:pointer;user-select:none;margin-bottom:0}
     details.card>summary::-webkit-details-marker{display:none}
     details.card>summary::marker{content:''}
-    details.card>summary::after{content:'\25b8';font-size:.75rem;float:right;color:#64748b;line-height:1.4}
+    details.card>summary::after{content:'\\25b8';font-size:.75rem;float:right;color:#64748b;line-height:1.4}
     details.card[open]>summary{margin-bottom:.8rem}
-    details.card[open]>summary::after{content:'\25be'}
+    details.card[open]>summary::after{content:'\\25be'}
     .filter-grid{display:grid;grid-template-columns:1fr 1fr;gap:.6rem 1.5rem;margin-top:.2rem}
     .filter-item label{display:block;font-size:.68rem;color:#64748b;text-transform:uppercase;letter-spacing:.08em;margin-bottom:.15rem}
     .filter-item .fval{font-size:.8rem;font-family:monospace;color:#e2e8f0}
