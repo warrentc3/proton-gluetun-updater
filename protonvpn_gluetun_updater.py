@@ -219,7 +219,7 @@ _HTML_PAGE = """\
     .err{margin-top:1rem;background:#1c0a0a;border:1px solid #7f1d1d;border-radius:6px;
          padding:.75rem;font-size:.78rem;color:#fca5a5;font-family:monospace;word-break:break-all}
     .tfa{background:#1e2130;border:1px solid #2d3348;border-radius:10px;
-         padding:1.5rem;width:100%;max-width:540px}
+         padding:1.5rem;width:100%;max-width:540px;margin-bottom:1rem}
     .tfa.active{border-color:#92400e}
     .tfa h2{font-size:1rem;color:#94a3b8;margin-bottom:.4rem}
     .tfa.active h2{color:#fdba74}
@@ -227,6 +227,7 @@ _HTML_PAGE = """\
                 font-weight:700;text-transform:uppercase;letter-spacing:.06em;margin-bottom:.8rem}
     .tfa-inactive{background:#1e293b;color:#64748b}
     .tfa-waiting{background:#451a03;color:#fdba74;animation:pulse 1s ease-in-out infinite}
+    .tfa-accepted{background:#14532d;color:#86efac}
     .tfa p{font-size:.8rem;color:#64748b;margin-bottom:.8rem}
     .tfa.active p{color:#94a3b8}
     .tfa-msg{font-size:.78rem;color:#fca5a5;margin-bottom:.6rem}
@@ -437,6 +438,38 @@ _HTML_PAGE = """\
       });
     })();
     refresh();setInterval(refresh,10000);
+    document.getElementById('tfa_form').addEventListener('submit',async function(e){
+      e.preventDefault();
+      var ti=document.getElementById('tfa_input');
+      var tb=document.getElementById('tfa_btn');
+      var tfab=document.getElementById('tfa_badge');
+      var td=document.getElementById('tfa_desc');
+      var tm=document.getElementById('tfa_msg');
+      var tc=document.getElementById('tfa_card');
+      tb.disabled=true;
+      try{
+        var r=await fetch('/2fa',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},
+          body:'code='+encodeURIComponent(ti.value.trim())});
+        if(r.ok){
+          tc.classList.remove('active');
+          ti.disabled=true;ti.value='';
+          tfab.textContent='accepted';
+          tfab.className='tfa-badge tfa-accepted';
+          td.textContent='Code accepted \u2014 authenticating\u2026';
+          tm.style.display='none';
+          setTimeout(refresh,1500);
+        }else{
+          var msg=await r.text();
+          tm.style.display='block';
+          tm.textContent=msg||'Submission failed \u2014 please try again.';
+          tb.disabled=false;
+        }
+      }catch(err){
+        tm.style.display='block';
+        tm.textContent='Network error \u2014 please try again.';
+        tb.disabled=false;
+      }
+    });
   </script>
 </body></html>
 """
@@ -532,7 +565,7 @@ async def _web_handler(
                 _http_respond(writer, "400 Bad Request", "text/plain",
                               "Not currently waiting for a 2FA code.")
             else:
-                _http_redirect(writer, "/")
+                _http_respond(writer, "200 OK", "application/json", '{"ok":true}')
         else:
             _http_respond(writer, "404 Not Found", "text/plain", "Not found")
 
