@@ -985,6 +985,18 @@ async def run_update(
 
 
 async def main():
+    _missing_creds = []
+    if not os.environ.get("PROTON_USERNAME"):
+        _missing_creds.append("PROTON_USERNAME")
+    if not os.environ.get("PROTON_PASSWORD"):
+        _missing_creds.append("PROTON_PASSWORD")
+    if _missing_creds:
+        print(
+            f"Warning: Environment variable(s) not set: {', '.join(_missing_creds)}. "
+            "Falling back to interactive prompt.",
+            file=sys.stderr,
+        )
+
     username, password = get_credentials()
 
     # Parse IP6 filter (default: exclude)
@@ -1056,6 +1068,12 @@ async def main():
     )
     broker = _TwoFABroker()
     web_server = await _start_web_server(web_host, web_port, runtime, broker)
+
+    if _missing_creds:
+        runtime.last_error = (
+            f"Warning: {', '.join(_missing_creds)} not set — credentials were entered interactively. "
+            "Set these environment variables to run unattended."
+        )
 
     runtime.state = "authenticating"
     session = await _authenticate(username, password)
