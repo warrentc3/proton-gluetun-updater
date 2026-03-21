@@ -5,19 +5,10 @@ provider format (servers-proton.json).
 
 Authenticates directly against the Proton API using SRP.
 
-IMPROVEMENTS over original version:
-- Complete 194-country mapping (vs 70)
-- Parse country from server name (critical for secure_core routing)
-- Include ALL feature flags (free, secure_core, tor, stream, port_forward)
-- Only include feature flags when true (cleaner JSON, matches Gluetun implementation)
-- Fix Wireguard bug: no tcp/udp properties (only OpenVPN uses these)
-- Physical server deduplication for non-secure_core servers
-- Better statistics and verbose output
-
 Environment variables:
     PROTON_USERNAME   Proton account username (or use Docker secret: proton_username)
     PROTON_PASSWORD   Proton account password (or use Docker secret: proton_password)
-    STORAGE_FILEPATH  Storage directory path (required, output file: servers-proton.json)
+    STORAGE_FILEPATH  Storage directory path (required, output file: servers-proton.json). Can also be set to a file path (e.g. /gluetun/servers.json) — the parent directory is inferred automatically.
     IP6               IPv6 address behavior: include (add IPv6 IPs when available), exclude (default, strip IPv6 from output), or only (filter to servers with IPv6 and include their IPs). IPv6 data is always fetched from the API.
     SECURE_CORE       Filter secure_core servers: include (default), exclude, or only
     TOR               Filter TOR servers: include (default), exclude, or only
@@ -29,7 +20,6 @@ Environment variables:
 """
 import asyncio
 import dataclasses
-import getpass
 import json
 import os
 import random
@@ -55,7 +45,7 @@ SECURE_CORE = 1 << 0  # 1
 TOR = 1 << 1          # 2
 P2P = 1 << 2          # 4
 STREAMING = 1 << 3    # 8
-IPV6 = 1 << 4         # 16
+IPV6 = 1 << 4         # 16 — defined for documentation; IPv6 filtering uses EntryIPv6 field directly
 
 # Load country names from external file
 def load_country_names() -> dict:
@@ -116,23 +106,11 @@ def parse_country_from_name(server_name: str, is_secure_core: bool) -> str:
 def _read_secret(name: str) -> str | None:
     """Read a Docker secret from /run/secrets/<name>, returning None if absent."""
     try:
-        value = open(f"/run/secrets/{name}", encoding="utf-8").read().strip()
+        with open(f"/run/secrets/{name}", encoding="utf-8") as f:
+            value = f.read().strip()
         return value or None
     except OSError:
         return None
-
-
-def get_credentials() -> tuple[str, str]:
-    username = os.environ.get("PROTON_USERNAME") or _read_secret("proton_username")
-    password = os.environ.get("PROTON_PASSWORD") or _read_secret("proton_password")
-
-    if not username:
-        print("Proton username: ", end="", file=sys.stderr, flush=True)
-        username = input()
-    if not password:
-        password = getpass.getpass("Proton password: ", stream=sys.stderr)
-
-    return username, password
 
 
 # ---------------------------------------------------------------------------
@@ -146,7 +124,6 @@ class _Config:
     secure_core: str = "include"
     tor: str = "include"
     free_tier: str = "include"
-    replace_json: bool = False  # kept for backward compat display only
     gluetun_json: str = "none"  # none|replace|update
 
 
@@ -652,12 +629,6 @@ def _http_respond(writer: asyncio.StreamWriter, status: str, ctype: str, body: s
     )
 
 
-def _http_redirect(writer: asyncio.StreamWriter, location: str) -> None:
-    writer.write(
-        f"HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".encode()
-    )
-
-
 async def _web_handler(
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
@@ -727,7 +698,6 @@ async def _web_handler(
                 runtime.config.tor = new_vals["tor"]
                 runtime.config.free_tier = new_vals["free_tier"]
                 runtime.config.gluetun_json = new_vals["gluetun_json"]
-                runtime.config.replace_json = new_vals["gluetun_json"] == "replace"
                 _http_respond(writer, "200 OK", "application/json", '{"ok":true}')
 
         elif method == "POST" and path == "/reprocess":
@@ -887,16 +857,10 @@ async def _fetch_server_list(
 
 def transform(api_data: dict, ipv6_filter: str = "exclude", secure_core_filter: str = "include", tor_filter: str = "include", free_tier_filter: str = "include") -> tuple[dict, dict]:
     """
-    Transform ProtonVPN API data to Gluetun format.
-    
-    Improvements:
-    - Parse country from server name (not ExitCountry)
-    - Include all feature flags (free, secure_core, tor, stream, port_forward)
-    - Only include feature flags when true
-    - Fix Wireguard: no tcp/udp properties
-    - Deduplicate physical servers for non-secure_core
-    - IPv6 filter (include/exclude/only)
-    - Filtering by secure_core, TOR, free tier, and IPv6 (include/exclude/only)
+    Transform ProtonVPN API data to Gluetun custom-provider format.
+
+    Applies the given filters (include/exclude/only), deduplicates physical servers,
+    and returns a (gluetun_servers_dict, stats_payload_dict) tuple.
     """
     # Compute raw totals from API data before any filtering
     _all = api_data["LogicalServers"]
@@ -1448,6 +1412,19 @@ async def main():
         print("Error: STORAGE_FILEPATH environment variable is required.", file=sys.stderr)
         sys.exit(1)
 
+    # If STORAGE_FILEPATH points to a file (e.g. /gluetun/servers.json), infer the
+    # parent directory so the updater works correctly when mounted in the same stack
+    # as Gluetun without requiring the user to strip the filename from the path.
+    _storage_p = Path(storage_path)
+    if _storage_p.suffix:
+        _inferred = str(_storage_p.parent)
+        print(
+            f"Info: STORAGE_FILEPATH='{storage_path}' looks like a file path — "
+            f"using parent directory '{_inferred}' as storage path.",
+            file=sys.stderr,
+        )
+        storage_path = _inferred
+
     # Build seed defaults from env vars (applied only when config.yaml does not yet exist)
     _three_way = ("include", "exclude", "only")
 
@@ -1506,7 +1483,6 @@ async def main():
             secure_core=secure_core_filter,
             tor=tor_filter,
             free_tier=free_tier_filter,
-            replace_json=gluetun_json_mode == "replace",  # backward compat display
             gluetun_json=gluetun_json_mode,
         ),
         cache_dir=cache_dir,
@@ -1546,8 +1522,7 @@ async def main():
             # On the very first iteration, skip the update if the cached server
             # list is still fresh (< 12 h).  The user can trigger a fetch manually
             # via the "Fetch Now" button.  After the first sleep we always fetch.
-            if first_run and not force and _load_cached_api(storage_path) is not None:
-                cached_result = _load_cached_api(storage_path)
+            if first_run and not force and (cached_result := _load_cached_api(storage_path)) is not None:
                 cache_ts = int(cached_result[1].stem.split(".", 1)[1])
                 age_min = int((time.time() - cache_ts) / 60)
                 print(

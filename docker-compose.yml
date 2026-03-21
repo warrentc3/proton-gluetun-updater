@@ -18,7 +18,7 @@ services:
     env_file:
       - .env
     environment:
-      STORAGE_FILEPATH: /gluetun # MANDATORY: Storage directory path (output file: servers-proton.json)
+      STORAGE_FILEPATH: /gluetun # MANDATORY: Directory path for output files. Can also be set to a file path (e.g. /gluetun/servers.json) — parent directory is inferred automatically.
       SECURE_CORE: include # OPTIONAL: Filter Secure Core servers: include (default), exclude, or only
       TOR: include # OPTIONAL: Filter TOR servers: include (default), exclude, or only
       FREE_TIER: include # OPTIONAL: Filter free tier servers: include (default), exclude, or only
