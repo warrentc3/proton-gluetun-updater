@@ -53,6 +53,7 @@ The filtering pipeline works as follows:
 Without any filter, all servers are exported (sorted by secure_core, TOR, country, city, load).
 
 ## Web Dashboard
+![Example](https://github.com/user-attachments/assets/ef592d4b-df6a-4c63-83b9-b122469b5993)
 
 A lightweight web dashboard is always available on `WEB_PORT` (default `8080`). No extra dependencies are required — it uses Python's built-in `asyncio`.
 
