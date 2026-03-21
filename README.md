@@ -1,25 +1,44 @@
 Companion container for [Gluetun](https://github.com/qdm12/gluetun) to fetch the Proton VPN server list. Authenticates directly against the Proton API (SRP) — no dependency on the Proton VPN desktop app.
 
-REPLACE_GLUETUN_SERVERS_JSON=true will overwrite servers.json if you set the STORAGE_FILEPATH to use the same mount that gluetun uses.
-servers-proton.json will always be written to STORAGE_FILEPATH.
+`servers-proton.json` is always written to `STORAGE_FILEPATH`. Use `GLUETUN_SERVERS_JSON=update` to merge ProtonVPN servers into the existing `servers.json` while preserving all other providers, or `GLUETUN_SERVERS_JSON=replace` to overwrite `servers.json` entirely with ProtonVPN-only content.
 
 
 ## Environment variables
 | Variable           | Required | Description                                                                                           |
 | ------------------ | -------- | ----------------------------------------------------------------------------------------------------- |
-| `PROTON_USERNAME`  | Yes      | Proton account username                                                                               |
-| `PROTON_PASSWORD`  | Yes      | Proton account password                                                                               |
+| `PROTON_USERNAME`  | Yes*     | Proton account username. Can be omitted if the Docker secret `proton_username` is used instead.       |
+| `PROTON_PASSWORD`  | Yes*     | Proton account password. Can be omitted if the Docker secret `proton_password` is used instead.       |
 | `STORAGE_FILEPATH` | Yes      | Storage directory path                                          |
 | `WEB_HOST`         | No       | Web dashboard bind address (default: `127.0.0.1` for localhost-only access; use `0.0.0.0` to expose publicly) |
 | `WEB_PORT`         | No       | Port for the web dashboard (default: `8080`)                                                          |
-| `REPLACE_GLUETUN_SERVERS_JSON` | No | Replace `servers.json` with `servers-proton.json` (`1`/`true`/`yes` or `0`/`false`/`no`, default: `false`) |
+| `GLUETUN_SERVERS_JSON` | No  | How to update Gluetun's `servers.json`: `none` (default, don't touch it), `replace` (overwrite entirely with ProtonVPN-only content), or `update` (merge ProtonVPN servers into the existing file, preserving all other providers) |
+| `REPLACE_GLUETUN_SERVERS_JSON` | No | **Deprecated.** Use `GLUETUN_SERVERS_JSON=replace` instead. Still accepted for backward compatibility. |
 | `FREE_TIER`        | No       | Filter free tier servers: `include` (default), `exclude`, or `only`                                   |
 | `SECURE_CORE`      | No       | Filter Secure Core servers: `include` (default), `exclude`, or `only`                                 |
 | `TOR`              | No       | Filter TOR servers: `include` (default), `exclude`, or `only`                                         |
 | `IP6`              | No       | IPv6 address behavior: `include` (add IPv6 IPs to server entries when available), `exclude` (default, strip IPv6 from output), or `only` (filter to servers with IPv6 and include their IPs). IPv6 data is always fetched from the API. |
-| `DEBUG`            | No       | Save raw API response to debug directory (`1`/`true`/`yes` or `0`/`false`/`no`, default: `false`)     |
-| `DEBUG_DIR`        | No       | Debug output directory (default: `STORAGE_FILEPATH/debug` when `DEBUG=true` and `DEBUG_DIR` is unset) |
 
+
+### Docker secrets (optional)
+
+As an alternative to environment variables, credentials can be supplied via [Docker secrets](https://docs.docker.com/compose/how-tos/use-secrets/), which keeps them out of `docker inspect` output and compose files:
+
+```yaml
+secrets:
+  proton_username:
+    file: ./secrets/proton_username.txt
+  proton_password:
+    file: ./secrets/proton_password.txt
+
+services:
+  gtupdate:
+    secrets:
+      - proton_username
+      - proton_password
+    # PROTON_USERNAME / PROTON_PASSWORD env vars can be omitted when secrets are used
+```
+
+Secret files should contain only the value — no surrounding quotes or extra whitespace. The lookup order is: environment variable → Docker secret → interactive prompt.
 
 ### Filtering and sorting
 Servers are sorted by: secure_core first, then TOR, then alphabetically by country and city, then by **load ascending** (lower load = better).
@@ -49,15 +68,6 @@ A lightweight web dashboard is always available on `WEB_PORT` (default `8080`). 
 **Theme:** A light/dark mode toggle is available in the top-right corner. The preference is saved to `localStorage` and defaults to dark mode.
 
 > **Security Note:** The dashboard has no authentication and includes a 2FA submission endpoint. By default it binds to `127.0.0.1` (localhost-only) for safety. To expose it in a Docker container, set `WEB_HOST=0.0.0.0` and control access via Docker port binding (`-p 127.0.0.1:8080:8080`) or a reverse proxy with authentication.
-
-## Debug Mode
-
-When `DEBUG=true`, the script saves the raw API response from ProtonVPN before transformation. This is useful for:
-- Troubleshooting transformation issues
-- Analyzing changes in the ProtonVPN API response
-- Preserving historical server data
-
-The debug output is saved as `serverlist.{EPOCHTIME}.tar.gz` in the debug directory. The uncompressed JSON is automatically removed after compression to save space.
 
 ## License
 

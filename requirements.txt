@@ -1,1 +1,2 @@
 proton-core @ git+https://github.com/ProtonVPN/python-proton-core.git
+PyYAML

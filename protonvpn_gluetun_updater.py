@@ -15,18 +15,17 @@ IMPROVEMENTS over original version:
 - Better statistics and verbose output
 
 Environment variables:
-    PROTON_USERNAME   Proton account username
-    PROTON_PASSWORD   Proton account password
+    PROTON_USERNAME   Proton account username (or use Docker secret: proton_username)
+    PROTON_PASSWORD   Proton account password (or use Docker secret: proton_password)
     STORAGE_FILEPATH  Storage directory path (required, output file: servers-proton.json)
     IP6               IPv6 address behavior: include (add IPv6 IPs when available), exclude (default, strip IPv6 from output), or only (filter to servers with IPv6 and include their IPs). IPv6 data is always fetched from the API.
     SECURE_CORE       Filter secure_core servers: include (default), exclude, or only
     TOR               Filter TOR servers: include (default), exclude, or only
     FREE_TIER         Filter free tier servers: include (default), exclude, or only
-    REPLACE_GLUETUN_SERVERS_JSON  Replace servers.json with servers-proton.json (1/true/yes or 0/false/no, default: false)
+    REPLACE_GLUETUN_SERVERS_JSON  Deprecated. Use GLUETUN_SERVERS_JSON=replace instead.
+    GLUETUN_SERVERS_JSON  How to update Gluetun's servers.json: none (default, don't touch it), replace (overwrite entirely with ProtonVPN-only content), or update (merge ProtonVPN servers into existing file, preserving all other providers)
     WEB_HOST          Web dashboard bind address (default: 127.0.0.1 for localhost-only; use 0.0.0.0 to expose publicly)
     WEB_PORT          Web dashboard port (default: 8080)
-    DEBUG             Save raw API response to debug directory (1/true/yes or 0/false/no, default: false)
-    DEBUG_DIR         Debug output directory (default: STORAGE_FILEPATH/debug when DEBUG=true and DEBUG_DIR is unset)
 """
 import asyncio
 import dataclasses
@@ -37,11 +36,12 @@ import random
 import re
 import signal
 import sys
-import tarfile
 import tempfile
 import time
 from pathlib import Path
 from urllib.parse import parse_qs
+
+import yaml
 
 from proton.session import Session
 from proton.session.exceptions import ProtonAPI2FANeeded
@@ -113,9 +113,18 @@ def parse_country_from_name(server_name: str, is_secure_core: bool) -> str:
     return server_name
 
 
+def _read_secret(name: str) -> str | None:
+    """Read a Docker secret from /run/secrets/<name>, returning None if absent."""
+    try:
+        value = open(f"/run/secrets/{name}", encoding="utf-8").read().strip()
+        return value or None
+    except OSError:
+        return None
+
+
 def get_credentials() -> tuple[str, str]:
-    username = os.environ.get("PROTON_USERNAME")
-    password = os.environ.get("PROTON_PASSWORD")
+    username = os.environ.get("PROTON_USERNAME") or _read_secret("proton_username")
+    password = os.environ.get("PROTON_PASSWORD") or _read_secret("proton_password")
 
     if not username:
         print("Proton username: ", end="", file=sys.stderr, flush=True)
@@ -127,30 +136,39 @@ def get_credentials() -> tuple[str, str]:
 
 
 # ---------------------------------------------------------------------------
-# Runtime state, 2FA broker, and web dashboard
+# Runtime state, TFA broker, and web dashboard
 # ---------------------------------------------------------------------------
+
+@dataclasses.dataclass
+class _Config:
+    """Mutable filter configuration (persisted to config.yaml)."""
+    ip6: str = "exclude"
+    secure_core: str = "include"
+    tor: str = "include"
+    free_tier: str = "include"
+    replace_json: bool = False  # kept for backward compat display only
+    gluetun_json: str = "none"  # none|replace|update
+
 
 @dataclasses.dataclass
 class _Status:
     """Mutable runtime state surfaced on the web dashboard."""
+    config: _Config = dataclasses.field(default_factory=_Config)
     start_time: float = dataclasses.field(default_factory=time.time)
-    state: str = "starting"     # starting|authenticating|running|sleeping|waiting_2fa|error|shutting_down
+    state: str = "starting"     # starting|authenticating|running|sleeping|waiting_tfa|error|shutting_down
     last_run_time: float | None = None
     next_run_time: float | None = None
     last_server_count: int | None = None
     last_error: str | None = None
     run_count: int = 0
     last_stats: dict | None = None
-    # Configuration parameters
-    config_ip6: str = "exclude"
-    config_secure_core: str = "include"
-    config_tor: str = "include"
-    config_free_tier: str = "include"
-    config_replace_json: bool = False
-    config_debug: bool = False
+    tfa_required: bool | None = None  # None=unknown, False=not needed, True=was required
+    configuration_error: bool = False
+    cache_dir: Path | None = None  # set after STORAGE_FILEPATH is resolved
+    force_fetch: asyncio.Event = dataclasses.field(default_factory=asyncio.Event)
 
 
-class _TwoFABroker:
+class _TfaBroker:
     """Bridges the web 2FA form submission to the asyncio authentication flow."""
 
     def __init__(self) -> None:
@@ -209,7 +227,7 @@ _HTML_PAGE = """\
     .s-authenticating{background:#1e293b;color:#93c5fd;animation:pulse 1.2s ease-in-out infinite}
     .s-running{background:#14532d;color:#86efac;animation:pulse 1.2s ease-in-out infinite}
     .s-sleeping{background:#1e3a5f;color:#7dd3fc}
-    .s-waiting_2fa{background:#451a03;color:#fdba74;animation:pulse 1s ease-in-out infinite}
+    .s-waiting_tfa{background:#451a03;color:#fdba74;animation:pulse 1s ease-in-out infinite}
     .s-error{background:#450a0a;color:#fca5a5}
     @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
     .grid{display:grid;grid-template-columns:1fr 1fr;gap:.8rem 2rem}
@@ -218,6 +236,10 @@ _HTML_PAGE = """\
     .stat .val{font-size:.88rem;font-family:monospace;color:#e2e8f0}
     .err{margin-top:1rem;background:#1c0a0a;border:1px solid #7f1d1d;border-radius:6px;
          padding:.75rem;font-size:.78rem;color:#fca5a5;font-family:monospace;word-break:break-all}
+    .cfg-banner{background:#7f1d1d;border:2px solid #ef4444;color:#fecaca;padding:1rem 1.5rem;
+                font-size:.95rem;font-weight:700;border-radius:8px;margin-bottom:1.2rem;
+                text-align:center;line-height:1.6;letter-spacing:.01em}
+    body.light .cfg-banner{background:#fef2f2;border-color:#dc2626;color:#7f1d1d}
     .tfa{background:#1e2130;border:1px solid #2d3348;border-radius:10px;
          padding:1.5rem;width:100%;max-width:540px;margin-bottom:1rem}
     .tfa.active{border-color:#92400e}
@@ -226,6 +248,8 @@ _HTML_PAGE = """\
     .tfa-badge{display:inline-block;padding:.2rem .75rem;border-radius:999px;font-size:.72rem;
                 font-weight:700;text-transform:uppercase;letter-spacing:.06em;margin-bottom:.8rem}
     .tfa-inactive{background:#1e293b;color:#64748b}
+    .tfa-not-required{background:#1e293b;color:#7dd3fc}
+    .tfa-verified{background:#14532d;color:#86efac}
     .tfa-waiting{background:#451a03;color:#fdba74;animation:pulse 1s ease-in-out infinite}
     .tfa-accepted{background:#14532d;color:#86efac}
     .tfa p{font-size:.8rem;color:#64748b;margin-bottom:.8rem}
@@ -262,6 +286,33 @@ _HTML_PAGE = """\
     .filter-grid{display:grid;grid-template-columns:1fr 1fr;gap:.6rem 1.5rem;margin-top:.2rem}
     .filter-item label{display:block;font-size:.68rem;color:#64748b;text-transform:uppercase;letter-spacing:.08em;margin-bottom:.15rem}
     .filter-item .fval{font-size:.8rem;font-family:monospace;color:#e2e8f0}
+    .filter-item select{width:100%;background:#0f1117;border:1px solid #2d3348;border-radius:5px;
+      color:#e2e8f0;font-size:.8rem;font-family:monospace;padding:.3rem .5rem;cursor:pointer;outline:none}
+    .filter-item select:focus{border-color:#475569}
+    .cfg-apply{margin-top:1rem;display:flex;gap:.6rem;align-items:center}
+    .cfg-apply-btn{background:#334155;color:#94a3b8;border:none;border-radius:6px;
+      padding:.45rem 1.1rem;font-size:.82rem;font-weight:600;cursor:pointer;transition:background .15s,color .15s}
+    .cfg-apply-btn:hover{background:#475569;color:#e2e8f0}
+    .cfg-apply-btn:active{background:#1e293b}
+    .refresh-btn{background:#1e3a5f;color:#7dd3fc;border:none;border-radius:6px;
+      padding:.45rem 1.1rem;font-size:.82rem;font-weight:600;cursor:pointer;transition:background .15s,color .15s}
+    .refresh-btn:hover{background:#1e4976;color:#bae6fd}
+    .refresh-btn:active{background:#0f2744}
+    .refresh-btn:disabled{opacity:.5;cursor:not-allowed}
+    .reprocess-btn{background:#14532d;color:#86efac;border:none;border-radius:6px;
+      padding:.45rem 1.1rem;font-size:.82rem;font-weight:600;cursor:pointer;transition:background .15s,color .15s}
+    .reprocess-btn:hover{background:#166534;color:#bbf7d0}
+    .reprocess-btn:active{background:#052e16}
+    .reprocess-btn:disabled{opacity:.5;cursor:not-allowed}
+    .cfg-msg{font-size:.76rem;font-family:monospace}
+    .cfg-msg.ok{color:#86efac}.cfg-msg.err{color:#fca5a5}
+    body.light .filter-item select{background:#f8fafc;border-color:#cbd5e1;color:#1e293b}
+    body.light .cfg-apply-btn{background:#e2e8f0;color:#475569}
+    body.light .cfg-apply-btn:hover{background:#cbd5e1;color:#1e293b}
+    body.light .reprocess-btn{background:#dcfce7;color:#166534}
+    body.light .reprocess-btn:hover{background:#bbf7d0;color:#14532d}
+    body.light .refresh-btn{background:#dbeafe;color:#1e40af}
+    body.light .refresh-btn:hover{background:#bfdbfe;color:#1e3a8a}
     footer{font-size:.7rem;color:#334155;margin-top:1.5rem}
     #theme-btn{position:fixed;top:.9rem;right:1rem;background:transparent;border:1px solid #2d3348;
       border-radius:6px;color:#64748b;font-size:1.05rem;cursor:pointer;padding:.28rem .6rem;
@@ -277,6 +328,8 @@ _HTML_PAGE = """\
     body.light .tfa h2{color:#475569}
     body.light .tfa p{color:#475569}
     body.light .tfa-inactive{color:#475569}
+    body.light .tfa-not-required{background:#dbeafe;color:#1e40af}
+    body.light .tfa-verified{background:#dcfce7;color:#166534}
     body.light .tfa-waiting{color:#fdba74}
     body.light .tfa-in{background:#f8fafc;border-color:#cbd5e1;color:#475569}
     body.light .tfa.active .tfa-in{border-color:#94a3b8;color:#1e293b}
@@ -295,6 +348,7 @@ _HTML_PAGE = """\
 </head>
 <body>
   <button id="theme-btn" title="Switch to light mode" aria-label="Toggle theme">☀️</button>
+  <div id="cfg_banner" class="cfg-banner" style="display:none" role="alert"></div>
   <h1>ProtonVPN Gluetun Updater</h1>
   <p class="sub">Automatic ProtonVPN server list updater for Gluetun</p>
   <div class="card" id="status_card">
@@ -304,6 +358,10 @@ _HTML_PAGE = """\
       <div class="stat"><label>Last Run</label><span class="val" id="last_run">&#x2014;</span></div>
       <div class="stat"><label>Next Run</label><span class="val" id="next_run">&#x2014;</span></div>
       <div class="stat"><label>Servers Written</label><span class="val" id="server_count">&#x2014;</span></div>
+    </div>
+    <div style="margin-top:.8rem;display:flex;align-items:center;gap:.6rem">
+      <button class="refresh-btn" type="button" id="refresh_btn">&#x21bb; Fetch Now</button>
+      <span id="fetch_msg" class="cfg-msg" style="display:none"></span>
     </div>
     <div id="err" class="err" style="display:none"></div>
   </div>
@@ -320,14 +378,25 @@ _HTML_PAGE = """\
   </div>
   <details class="card" id="filter_card">
     <summary id="filter_heading" class="section-heading">Filter Configuration</summary>
+    <form id="cfg_form">
     <div class="filter-grid" id="filter_grid">
-      <div class="filter-item" id="fi_ip6"><label id="lbl_ip6">IP6</label><span class="fval" id="cfg_ip6" aria-labelledby="lbl_ip6">&#x2014;</span></div>
-      <div class="filter-item" id="fi_secure_core"><label id="lbl_secure_core">Secure Core</label><span class="fval" id="cfg_secure_core" aria-labelledby="lbl_secure_core">&#x2014;</span></div>
-      <div class="filter-item" id="fi_tor"><label id="lbl_tor">TOR</label><span class="fval" id="cfg_tor" aria-labelledby="lbl_tor">&#x2014;</span></div>
-      <div class="filter-item" id="fi_free_tier"><label id="lbl_free_tier">Free Tier</label><span class="fval" id="cfg_free_tier" aria-labelledby="lbl_free_tier">&#x2014;</span></div>
-      <div class="filter-item" id="fi_replace_json"><label id="lbl_replace_json">Replace JSON</label><span class="fval" id="cfg_replace_json" aria-labelledby="lbl_replace_json">&#x2014;</span></div>
-      <div class="filter-item" id="fi_debug"><label id="lbl_debug">Debug</label><span class="fval" id="cfg_debug" aria-labelledby="lbl_debug">&#x2014;</span></div>
+      <div class="filter-item" id="fi_ip6"><label for="sel_ip6">IP6</label>
+        <select id="sel_ip6" name="ip6"><option>include</option><option>exclude</option><option>only</option></select></div>
+      <div class="filter-item" id="fi_secure_core"><label for="sel_secure_core">Secure Core</label>
+        <select id="sel_secure_core" name="secure_core"><option>include</option><option>exclude</option><option>only</option></select></div>
+      <div class="filter-item" id="fi_tor"><label for="sel_tor">TOR</label>
+        <select id="sel_tor" name="tor"><option>include</option><option>exclude</option><option>only</option></select></div>
+      <div class="filter-item" id="fi_free_tier"><label for="sel_free_tier">Free Tier</label>
+        <select id="sel_free_tier" name="free_tier"><option>include</option><option>exclude</option><option>only</option></select></div>
+      <div class="filter-item" id="fi_gluetun_json"><label for="sel_gluetun_json">Gluetun JSON</label>
+        <select id="sel_gluetun_json" name="gluetun_json"><option>none</option><option>replace</option><option>update</option></select></div>
     </div>
+    <div class="cfg-apply">
+      <button class="cfg-apply-btn" type="submit">Apply</button>
+      <button class="reprocess-btn" type="button" id="reprocess_btn">&#x21bb; Reprocess</button>
+      <span id="cfg_msg" class="cfg-msg" style="display:none"></span>
+    </div>
+    </form>
   </details>
   <details class="card" id="stats_card" style="display:none">
     <summary id="stats_heading" class="section-heading">Last Run Statistics</summary>
@@ -347,7 +416,7 @@ _HTML_PAGE = """\
         var b=document.getElementById('status_badge');
         var state=d.state;
         var displayState=state;
-        if(state==='waiting_2fa')displayState='waiting for 2FA';
+        if(state==='waiting_tfa')displayState='waiting for 2FA';
         b.textContent=displayState.replace(/_/g,' ');
         b.className='badge s-'+state;
         set('uptime',d.uptime);
@@ -370,8 +439,11 @@ _HTML_PAGE = """\
           set('next_run',nextRunText);
         }else{set('next_run',null);}
         set('server_count',d.server_count);
+        var cb=document.getElementById('cfg_banner');
+        if(d.configuration_error){cb.style.display='block';cb.textContent=d.last_error||'Missing credentials — restart the container after setting PROTON_USERNAME and PROTON_PASSWORD.';}
+        else{cb.style.display='none';}
         var eb=document.getElementById('err');
-        if(d.last_error){eb.style.display='block';eb.textContent=d.last_error;}
+        if(d.last_error&&!d.configuration_error){eb.style.display='block';eb.textContent=d.last_error;}
         else{eb.style.display='none';}
         var sc=document.getElementById('stats_card');
         var sb=document.getElementById('stats_body');
@@ -392,7 +464,7 @@ _HTML_PAGE = """\
         var tb=document.getElementById('tfa_btn');
         var td=document.getElementById('tfa_desc');
         var tfab=document.getElementById('tfa_badge');
-        if(d.waiting_2fa){
+        if(d.tfa_waiting){
           tc.classList.add('active');
           ti.disabled=false;tb.disabled=false;
           tfab.textContent='waiting';
@@ -402,20 +474,29 @@ _HTML_PAGE = """\
         }else{
           tc.classList.remove('active');
           ti.disabled=true;tb.disabled=true;ti.value='';
-          tfab.textContent='inactive';
-          tfab.className='tfa-badge tfa-inactive';
-          td.textContent='Not currently required';
+          if(d.tfa_required===false){
+            tfab.textContent='not required';
+            tfab.className='tfa-badge tfa-not-required';
+            td.textContent='Authentication succeeded without 2FA.';
+          }else if(d.tfa_required===true){
+            tfab.textContent='verified';
+            tfab.className='tfa-badge tfa-verified';
+            td.textContent='2FA authentication complete.';
+          }else{
+            tfab.textContent='inactive';
+            tfab.className='tfa-badge tfa-inactive';
+            td.textContent='Not currently required';
+          }
         }
         var tm=document.getElementById('tfa_msg');
-        if(d.twofa_message){tm.style.display='block';tm.textContent=d.twofa_message;}
+        if(d.tfa_message){tm.style.display='block';tm.textContent=d.tfa_message;}
         else{tm.style.display='none';}
         if(d.config){
-          set('cfg_ip6',d.config.ip6);
-          set('cfg_secure_core',d.config.secure_core);
-          set('cfg_tor',d.config.tor);
-          set('cfg_free_tier',d.config.free_tier);
-          set('cfg_replace_json',d.config.replace_json?'true':'false');
-          set('cfg_debug',d.config.debug?'true':'false');
+          var selMap={ip6:'sel_ip6',secure_core:'sel_secure_core',tor:'sel_tor',free_tier:'sel_free_tier',gluetun_json:'sel_gluetun_json'};
+          Object.keys(selMap).forEach(function(k){
+            var el=document.getElementById(selMap[k]);
+            if(el&&d.config[k]!=null&&document.activeElement!==el)el.value=d.config[k];
+          });
         }
         set('ts',new Date().toLocaleTimeString());
       }catch(e){}
@@ -438,6 +519,69 @@ _HTML_PAGE = """\
       });
     })();
     refresh();setInterval(refresh,10000);
+    document.getElementById('cfg_form').addEventListener('submit',async function(e){
+      e.preventDefault();
+      var msg=document.getElementById('cfg_msg');
+      var btn=document.querySelector('.cfg-apply-btn');
+      btn.disabled=true;
+      var fd=new FormData(e.target);
+      var body=new URLSearchParams(fd).toString();
+      try{
+        var r=await fetch('/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body});
+        msg.style.display='inline';
+        if(r.ok){
+          msg.textContent='\u2713 Saved';msg.className='cfg-msg ok';
+        }else{
+          var t=await r.text();
+          msg.textContent='\u2717 '+t;msg.className='cfg-msg err';
+        }
+      }catch(err){
+        msg.style.display='inline';msg.textContent='\u2717 Network error';msg.className='cfg-msg err';
+      }
+      btn.disabled=false;
+      setTimeout(function(){msg.style.display='none';},3000);
+    });
+    document.getElementById('reprocess_btn').addEventListener('click',async function(){
+      var btn=this;
+      var msg=document.getElementById('cfg_msg');
+      btn.disabled=true;
+      try{
+        var r=await fetch('/reprocess',{method:'POST'});
+        msg.style.display='inline';
+        if(r.ok){
+          msg.textContent='\u2713 Reprocessed';msg.className='cfg-msg ok';
+          setTimeout(refresh,1000);
+        }else{
+          var t=await r.text();
+          msg.textContent='\u2717 '+t;msg.className='cfg-msg err';
+        }
+      }catch(err){
+        msg.style.display='inline';msg.textContent='\u2717 Network error';msg.className='cfg-msg err';
+      }
+      btn.disabled=false;
+      setTimeout(function(){msg.style.display='none';},4000);
+    });
+    document.getElementById('refresh_btn').addEventListener('click',async function(){
+      var btn=this;
+      var msg=document.getElementById('fetch_msg');
+      btn.disabled=true;
+      try{
+        var r=await fetch('/refresh',{method:'POST'});
+        msg.style.display='inline';
+        if(r.ok){
+          msg.textContent='\u21bb Fetching…';msg.className='cfg-msg ok';
+          setTimeout(refresh,2000);
+        }else{
+          var t=await r.text();
+          msg.textContent='\u2717 '+t;msg.className='cfg-msg err';
+          btn.disabled=false;
+        }
+      }catch(err){
+        msg.style.display='inline';msg.textContent='\u2717 Network error';msg.className='cfg-msg err';
+        btn.disabled=false;
+      }
+      setTimeout(function(){msg.style.display='none';btn.disabled=false;},5000);
+    });
     document.getElementById('tfa_form').addEventListener('submit',async function(e){
       e.preventDefault();
       var ti=document.getElementById('tfa_input');
@@ -457,7 +601,7 @@ _HTML_PAGE = """\
           tfab.className='tfa-badge tfa-accepted';
           td.textContent='Code accepted \u2014 authenticating\u2026';
           tm.style.display='none';
-          setTimeout(refresh,1500);
+          setTimeout(refresh,5000);
         }else{
           var msg=await r.text();
           tm.style.display='block';
@@ -518,7 +662,7 @@ async def _web_handler(
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
     runtime: _Status,
-    broker: _TwoFABroker,
+    broker: _TfaBroker,
 ) -> None:
     try:
         req = await _read_http_request(reader)
@@ -541,19 +685,76 @@ async def _web_handler(
                 "server_count": runtime.last_server_count,
                 "run_count": runtime.run_count,
                 "last_error": runtime.last_error,
-                "waiting_2fa": broker.waiting,
-                "twofa_message": broker.message or None,
+                "tfa_waiting": broker.waiting,
+                "tfa_required": runtime.tfa_required,
+                "tfa_message": broker.message or None,
+                "configuration_error": runtime.configuration_error,
                 "stats": runtime.last_stats,
                 "config": {
-                    "ip6": runtime.config_ip6,
-                    "secure_core": runtime.config_secure_core,
-                    "tor": runtime.config_tor,
-                    "free_tier": runtime.config_free_tier,
-                    "replace_json": runtime.config_replace_json,
-                    "debug": runtime.config_debug,
+                    "ip6": runtime.config.ip6,
+                    "secure_core": runtime.config.secure_core,
+                    "tor": runtime.config.tor,
+                    "free_tier": runtime.config.free_tier,
+                    "gluetun_json": runtime.config.gluetun_json,
                 },
             })
             _http_respond(writer, "200 OK", "application/json", payload)
+
+        elif method == "POST" and path == "/config":
+            form = parse_qs(body.decode(errors="replace"))
+            def _fv(key: str) -> str:
+                return (form.get(key) or [""])[0].strip().lower()
+            new_vals = {
+                "ip6": _fv("ip6"),
+                "secure_core": _fv("secure_core"),
+                "tor": _fv("tor"),
+                "free_tier": _fv("free_tier"),
+                "gluetun_json": _fv("gluetun_json"),
+            }
+            errors = [
+                f"'{k}' must be one of {_FILTER_CHOICES[k]}, got '{v}'"
+                for k, v in new_vals.items()
+                if v not in _FILTER_CHOICES[k]
+            ]
+            if errors:
+                _http_respond(writer, "400 Bad Request", "text/plain", "; ".join(errors))
+            elif runtime.cache_dir is None:
+                _http_respond(writer, "503 Service Unavailable", "text/plain", "Storage path not yet initialised.")
+            else:
+                _save_filter_config(runtime.cache_dir / "config.yaml", new_vals)
+                runtime.config.ip6 = new_vals["ip6"]
+                runtime.config.secure_core = new_vals["secure_core"]
+                runtime.config.tor = new_vals["tor"]
+                runtime.config.free_tier = new_vals["free_tier"]
+                runtime.config.gluetun_json = new_vals["gluetun_json"]
+                runtime.config.replace_json = new_vals["gluetun_json"] == "replace"
+                _http_respond(writer, "200 OK", "application/json", '{"ok":true}')
+
+        elif method == "POST" and path == "/reprocess":
+            if runtime.cache_dir is None:
+                _http_respond(writer, "503 Service Unavailable", "text/plain", "Storage path not yet initialised.")
+            elif runtime.state in ("running", "authenticating", "waiting_tfa"):
+                _http_respond(writer, "409 Conflict", "text/plain", "An update is already in progress.")
+            else:
+                storage_path_str = str(runtime.cache_dir.parent)
+                try:
+                    ok = _reprocess_from_cache(storage_path_str, runtime.config, runtime)
+                    if ok:
+                        _http_respond(writer, "200 OK", "application/json", '{"ok":true}')
+                    else:
+                        _http_respond(writer, "404 Not Found", "text/plain", "No cached server list found — use Fetch Now first.")
+                except Exception as _rpe:
+                    print(f"Reprocess error: {_rpe}", file=sys.stderr)
+                    _http_respond(writer, "500 Internal Server Error", "text/plain", str(_rpe))
+
+        elif method == "POST" and path == "/refresh":
+            if runtime.state in ("sleeping", "error"):
+                runtime.force_fetch.set()
+                _http_respond(writer, "200 OK", "application/json", '{"ok":true}')
+            elif runtime.state in ("running", "authenticating", "waiting_tfa"):
+                _http_respond(writer, "409 Conflict", "text/plain", "An update is already in progress.")
+            else:
+                _http_respond(writer, "503 Service Unavailable", "text/plain", "Not ready yet.")
 
         elif method == "POST" and path == "/2fa":
             form = parse_qs(body.decode(errors="replace"))
@@ -583,7 +784,7 @@ async def _web_handler(
             pass
 
 
-async def _start_web_server(host: str, port: int, runtime: _Status, broker: _TwoFABroker) -> asyncio.Server:
+async def _start_web_server(host: str, port: int, runtime: _Status, broker: _TfaBroker) -> asyncio.Server:
     async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         await _web_handler(reader, writer, runtime, broker)
 
@@ -609,7 +810,7 @@ async def _authenticate(username: str, password: str) -> Session:
 
 async def _fetch_server_list(
     session: Session,
-    broker: _TwoFABroker | None = None,
+    broker: _TfaBroker | None = None,
     status: _Status | None = None,
 ) -> dict:
     """
@@ -628,13 +829,31 @@ async def _fetch_server_list(
     """
     print("Fetching server list...", file=sys.stderr)
     try:
-        return await session.async_api_request(LOGICALS_ENDPOINT)
+        result = await session.async_api_request(LOGICALS_ENDPOINT)
+        if status is not None and status.tfa_required is None:
+            status.tfa_required = False
+        return result
     except ProtonAPI2FANeeded:
+        if status is not None:
+            status.tfa_required = True
+        # Proton 2FA.Enabled bitmask: 1 = TOTP, 2 = FIDO2.
+        # If the account has 2FA but TOTP is not enabled, our web form (TOTP-
+        # only) can never satisfy the challenge — fail fast rather than looping
+        # forever.  Access the private mangled attribute defensively so a future
+        # library refactor degrades gracefully (we'd just fall through and let
+        # submission attempts fail with "Invalid code").
+        _2fa_info = getattr(session, '_Session__2FA', None) or {}
+        _2fa_enabled_bits = _2fa_info.get('Enabled', 0)
+        if _2fa_enabled_bits and not (_2fa_enabled_bits & 1):
+            raise RuntimeError(
+                "2FA is required but TOTP is not enabled on this account "
+                "(FIDO2 / hardware-key only).  Only TOTP codes are supported."
+            )
         if broker is not None:
             # Web dashboard path: loop until a valid code is submitted
             while True:
                 if status is not None:
-                    status.state = "waiting_2fa"
+                    status.state = "waiting_tfa"
                 print("Waiting for 2FA code via web dashboard...", file=sys.stderr)
                 totp_code = await broker.wait_for_code()
                 success = await session.async_validate_2fa_code(totp_code)
@@ -885,6 +1104,43 @@ def transform(api_data: dict, ipv6_filter: str = "exclude", secure_core_filter: 
     }, stats_payload
 
 
+def _validate_servers_json(data: dict, label: str) -> None:
+    """
+    Validate the structure of a Gluetun servers.json payload before writing.
+    Raises ValueError with a descriptive message if the structure is invalid.
+
+    Expected schema:
+      {
+        "version": <int>,
+        "<provider>": {
+          "version":   <int>,
+          "timestamp": <int>,
+          "servers":   <list>
+        },
+        ...
+      }
+    """
+    if not isinstance(data, dict):
+        raise ValueError(f"{label}: root must be a JSON object, got {type(data).__name__}")
+    if "version" not in data:
+        raise ValueError(f"{label}: missing required top-level 'version' field")
+    if not isinstance(data["version"], int):
+        raise ValueError(f"{label}: top-level 'version' must be an int, got {type(data['version']).__name__}")
+    for key, val in data.items():
+        if key == "version":
+            continue
+        if not isinstance(val, dict):
+            raise ValueError(f"{label}: provider '{key}' must be an object, got {type(val).__name__}")
+        for required_field, expected_type in (("version", int), ("timestamp", int), ("servers", list)):
+            if required_field not in val:
+                raise ValueError(f"{label}: provider '{key}' missing required field '{required_field}'")
+            if not isinstance(val[required_field], expected_type):
+                raise ValueError(
+                    f"{label}: provider '{key}'.{required_field} must be "
+                    f"{expected_type.__name__}, got {type(val[required_field]).__name__}"
+                )
+
+
 def _atomic_write(path: str, content: str) -> None:
     """Write content to path atomically via a temp file + os.replace()."""
     dir_path = os.path.dirname(path)
@@ -901,6 +1157,201 @@ def _atomic_write(path: str, content: str) -> None:
         raise
 
 
+# ---------------------------------------------------------------------------
+# Filter config — stored in STORAGE_FILEPATH/proton/config.yaml
+# ---------------------------------------------------------------------------
+
+_FILTER_DEFAULTS: dict[str, str] = {
+    "ip6": "exclude",
+    "secure_core": "include",
+    "tor": "include",
+    "free_tier": "include",
+    "gluetun_json": "none",
+}
+
+_FILTER_CHOICES: dict[str, tuple[str, ...]] = {
+    "ip6": ("include", "exclude", "only"),
+    "secure_core": ("include", "exclude", "only"),
+    "tor": ("include", "exclude", "only"),
+    "free_tier": ("include", "exclude", "only"),
+    "gluetun_json": ("none", "replace", "update"),
+}
+
+
+def _save_filter_config(config_file: Path, values: dict) -> None:
+    """Write filter values to config.yaml with a human-readable header comment."""
+    header = (
+        "# ProtonVPN Gluetun Updater — filter configuration\n"
+        "# ip6, secure_core, tor, free_tier: include | exclude | only\n"
+        "# gluetun_json: none | replace | update\n"
+    )
+    with open(config_file, "w", encoding="utf-8") as f:
+        f.write(header)
+        yaml.dump(values, f, default_flow_style=False, sort_keys=True, allow_unicode=True)
+
+
+def _load_or_create_filter_config(cache_dir: Path, env_defaults: dict) -> dict:
+    """
+    Load STORAGE_FILEPATH/proton/config.yaml.  If it does not exist, create it
+    seeded from *env_defaults* (parsed from environment variables).  Invalid or
+    missing keys are filled from _FILTER_DEFAULTS and the file is rewritten.
+    Returns a fully-validated dict of filter values.
+    """
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    config_file = cache_dir / "config.yaml"
+
+    if not config_file.exists():
+        values = {k: env_defaults.get(k, _FILTER_DEFAULTS[k]) for k in _FILTER_DEFAULTS}
+        _save_filter_config(config_file, values)
+        print(f"Created filter config: {config_file}", file=sys.stderr)
+        return values
+
+    try:
+        with open(config_file, encoding="utf-8") as f:
+            raw = yaml.safe_load(f) or {}
+    except Exception as e:
+        print(f"Warning: Could not read {config_file}: {e} — using defaults.", file=sys.stderr)
+        return dict(_FILTER_DEFAULTS)
+
+    values: dict[str, str] = {}
+    needs_rewrite = False
+    for key, default in _FILTER_DEFAULTS.items():
+        raw_val = str(raw.get(key, default)).lower()
+        if raw_val not in _FILTER_CHOICES[key]:
+            print(
+                f"Warning: Invalid config.yaml value for '{key}': '{raw_val}'. "
+                f"Using '{default}'.",
+                file=sys.stderr,
+            )
+            raw_val = default
+            needs_rewrite = True
+        values[key] = raw_val
+
+    # Remove unknown keys from the file
+    if needs_rewrite or set(raw.keys()) - set(_FILTER_DEFAULTS):
+        _save_filter_config(config_file, values)
+
+    return values
+
+
+_CACHE_MAX_AGE_SECONDS = 12 * 3600  # 12 hours
+
+
+def _load_cached_api(storage_path: str) -> tuple[dict, Path] | None:
+    """
+    Return (api_data, path) for the most-recent serverlist.*.json that is
+    younger than _CACHE_MAX_AGE_SECONDS, or None if no such file exists.
+    """
+    cache_dir = Path(storage_path) / "proton"
+    candidates = sorted(cache_dir.glob("serverlist.*.json"), reverse=True)
+    now = time.time()
+    for path in candidates:
+        try:
+            ts = int(path.stem.split(".", 1)[1])
+        except (IndexError, ValueError):
+            continue
+        age = now - ts
+        if age < _CACHE_MAX_AGE_SECONDS:
+            return json.loads(path.read_text(encoding="utf-8")), path
+    return None
+
+
+def _load_latest_api_cache(storage_path: str) -> tuple[dict, Path] | None:
+    """
+    Return (api_data, path) for the most-recent serverlist.*.json, regardless
+    of age.  Used when re-applying filter config without fetching fresh data.
+    """
+    cache_dir = Path(storage_path) / "proton"
+    candidates = sorted(cache_dir.glob("serverlist.*.json"), reverse=True)
+    for path in candidates:
+        try:
+            int(path.stem.split(".", 1)[1])  # validate timestamp in filename
+        except (IndexError, ValueError):
+            continue
+        try:
+            return json.loads(path.read_text(encoding="utf-8")), path
+        except Exception:
+            continue
+    return None
+
+
+def _reprocess_from_cache(
+    storage_path: str,
+    config: "_Config",
+    status: "_Status | None" = None,
+) -> bool:
+    """
+    Load the most-recent cached server list (ignoring age), re-run transform
+    with *config*, write output files, and update *status* stats.
+    Returns True on success, False when no cache file is available.
+    """
+    cached = _load_latest_api_cache(storage_path)
+    if cached is None:
+        return False
+    api_data, cache_path = cached
+    result, transform_stats = transform(
+        api_data,
+        ipv6_filter=config.ip6,
+        secure_core_filter=config.secure_core,
+        tor_filter=config.tor,
+        free_tier_filter=config.free_tier,
+    )
+    output = json.dumps(result, indent=2)
+    count = len(result["protonvpn"]["servers"])
+    output_file = os.path.join(storage_path, "servers-proton.json")
+    os.makedirs(os.path.dirname(output_file), exist_ok=True)
+    _atomic_write(output_file, output)
+    print(f"Apply: {count} server entries written to {output_file} (from {cache_path.name})", file=sys.stderr)
+    if config.gluetun_json in ("replace", "update"):
+        servers_json_file = os.path.join(storage_path, "servers.json")
+        if config.gluetun_json == "replace":
+            _validate_servers_json(result, "servers-proton.json output")
+            _atomic_write(servers_json_file, output)
+            print(f"Apply: replaced {servers_json_file}", file=sys.stderr)
+        else:  # update
+            try:
+                with open(servers_json_file, "r", encoding="utf-8") as f:
+                    existing = json.load(f)
+            except FileNotFoundError:
+                existing = {"version": 1}
+            except json.JSONDecodeError as exc:
+                print(f"Apply: could not parse {servers_json_file}: {exc} — creating fresh.", file=sys.stderr)
+                existing = {"version": 1}
+            _validate_servers_json(existing, f"existing {servers_json_file}")
+            _validate_servers_json(result, "servers-proton.json output")
+            existing["protonvpn"] = result["protonvpn"]
+            merged = json.dumps(existing, indent=2)
+            _validate_servers_json(json.loads(merged), f"merged {servers_json_file}")
+            _atomic_write(servers_json_file, merged)
+            print(f"Apply: updated protonvpn servers in {servers_json_file}", file=sys.stderr)
+    if status is not None:
+        status.last_run_time = time.time()
+        status.last_server_count = count
+        status.last_stats = transform_stats
+    return True
+
+
+def _save_api_cache(api_data: dict, storage_path: str) -> None:
+    """
+    Save the raw API response to STORAGE_FILEPATH/proton/, keeping the
+    three most recent files named by epoch timestamp (oldest deleted).
+    """
+    cache_dir = Path(storage_path) / "proton"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    epoch_time = int(time.time())
+    dest = cache_dir / f"serverlist.{epoch_time}.json"
+    with open(dest, "w", encoding="utf-8") as f:
+        json.dump(api_data, f, indent=2)
+    print(f"Saved API response to {dest}", file=sys.stderr)
+
+    # Rotate: keep only the 3 most recent files
+    existing = sorted(cache_dir.glob("serverlist.*.json"))
+    for old in existing[:-3]:
+        old.unlink()
+        print(f"Rotated out old cache file {old.name}", file=sys.stderr)
+
+
 async def run_update(
     session: Session,
     storage_path,
@@ -908,44 +1359,28 @@ async def run_update(
     secure_core_filter,
     tor_filter,
     free_tier_filter,
-    replace_gluetun_servers_json,
-    debug,
-    debug_dir,
+    gluetun_json_mode,
     *,
     status: _Status | None = None,
-    broker: _TwoFABroker | None = None,
+    broker: _TfaBroker | None = None,
+    force_fetch: bool = False,
 ):
     """Execute a single update cycle."""
     if status is not None:
         status.state = "running"
         status.last_error = None
         status.next_run_time = None
-    api_data = await _fetch_server_list(session, broker=broker, status=status)
-    
-    # Save debug output if DEBUG=true
-    if debug:
-        epoch_time = int(time.time())
-        debug_path = Path(debug_dir)
-        debug_path.mkdir(parents=True, exist_ok=True)
-        
-        json_filename = f"serverlist.{epoch_time}.json"
-        json_filepath = debug_path / json_filename
-        tar_filename = f"serverlist.{epoch_time}.tar.gz"
-        tar_filepath = debug_path / tar_filename
-        
-        # Write JSON file
-        with open(json_filepath, 'w', encoding='utf-8') as f:
-            json.dump(api_data, f, indent=2)
-        print(f"Debug: Saved raw API response to {json_filepath}", file=sys.stderr)
-        
-        # Compress to tar.gz
-        with tarfile.open(tar_filepath, 'w:gz') as tar:
-            tar.add(json_filepath, arcname=json_filename)
-        print(f"Debug: Compressed to {tar_filepath}", file=sys.stderr)
-        
-        # Remove uncompressed JSON
-        json_filepath.unlink()
-        print(f"Debug: Removed uncompressed {json_filepath}", file=sys.stderr)
+
+    cached = _load_cached_api(storage_path)
+    if cached is not None and not force_fetch:
+        api_data, cache_path = cached
+        age_min = int((time.time() - int(cache_path.stem.split(".", 1)[1])) / 60)
+        print(f"Using cached server list ({age_min} min old): {cache_path.name}", file=sys.stderr)
+    else:
+        if force_fetch:
+            print("Force-fetch requested — bypassing cache.", file=sys.stderr)
+        api_data = await _fetch_server_list(session, broker=broker, status=status)
+        _save_api_cache(api_data, storage_path)
     
     result, transform_stats = transform(api_data, ipv6_filter=ipv6_filter, secure_core_filter=secure_core_filter, tor_filter=tor_filter, free_tier_filter=free_tier_filter)
 
@@ -971,11 +1406,29 @@ async def run_update(
     _atomic_write(output_file, output)
     print(f"\n{count} server entries written to {output_file}{filter_info}", file=sys.stderr)
 
-    # Optionally replace servers.json with servers-proton.json
-    if replace_gluetun_servers_json:
+    # Optionally update or replace Gluetun's servers.json
+    if gluetun_json_mode in ("replace", "update"):
         servers_json_file = os.path.join(storage_path, "servers.json")
-        _atomic_write(servers_json_file, output)
-        print(f"Replaced {servers_json_file} with servers-proton.json content", file=sys.stderr)
+        if gluetun_json_mode == "replace":
+            _validate_servers_json(result, "servers-proton.json output")
+            _atomic_write(servers_json_file, output)
+            print(f"Replaced {servers_json_file} with servers-proton.json content", file=sys.stderr)
+        else:  # update
+            try:
+                with open(servers_json_file, 'r', encoding='utf-8') as f:
+                    existing = json.load(f)
+            except FileNotFoundError:
+                existing = {"version": 1}
+            except json.JSONDecodeError as e:
+                print(f"Warning: Could not parse existing {servers_json_file}: {e}. Creating fresh.", file=sys.stderr)
+                existing = {"version": 1}
+            _validate_servers_json(existing, f"existing {servers_json_file}")
+            _validate_servers_json(result, "servers-proton.json output")
+            existing["protonvpn"] = result["protonvpn"]
+            merged = json.dumps(existing, indent=2)
+            _validate_servers_json(json.loads(merged), f"merged {servers_json_file}")
+            _atomic_write(servers_json_file, merged)
+            print(f"Updated protonvpn servers in {servers_json_file}", file=sys.stderr)
 
     if status is not None:
         status.last_run_time = time.time()
@@ -985,47 +1438,9 @@ async def run_update(
 
 
 async def main():
-    _missing_creds = []
-    if not os.environ.get("PROTON_USERNAME"):
-        _missing_creds.append("PROTON_USERNAME")
-    if not os.environ.get("PROTON_PASSWORD"):
-        _missing_creds.append("PROTON_PASSWORD")
-    if _missing_creds:
-        print(
-            f"Warning: Environment variable(s) not set: {', '.join(_missing_creds)}. "
-            "Falling back to interactive prompt.",
-            file=sys.stderr,
-        )
-
-    username, password = get_credentials()
-
-    # Parse IP6 filter (default: exclude)
-    ipv6_filter = os.environ.get("IP6", "exclude").lower()
-    if ipv6_filter not in ("include", "exclude", "only"):
-        print(f"Warning: Invalid IP6 value '{ipv6_filter}'. Using 'exclude'.", file=sys.stderr)
-        ipv6_filter = "exclude"
-
-    # Parse SECURE_CORE filter (default: include)
-    secure_core_filter = os.environ.get("SECURE_CORE", "include").lower()
-    if secure_core_filter not in ("include", "exclude", "only"):
-        print(f"Warning: Invalid SECURE_CORE value '{secure_core_filter}'. Using 'include'.", file=sys.stderr)
-        secure_core_filter = "include"
-
-    # Parse TOR filter (default: include)
-    tor_filter = os.environ.get("TOR", "include").lower()
-    if tor_filter not in ("include", "exclude", "only"):
-        print(f"Warning: Invalid TOR value '{tor_filter}'. Using 'include'.", file=sys.stderr)
-        tor_filter = "include"
-
-    # Parse FREE_TIER filter (default: include)
-    free_tier_filter = os.environ.get("FREE_TIER", "include").lower()
-    if free_tier_filter not in ("include", "exclude", "only"):
-        print(f"Warning: Invalid FREE_TIER value '{free_tier_filter}'. Using 'include'.", file=sys.stderr)
-        free_tier_filter = "include"
-
-    # Parse REPLACE_GLUETUN_SERVERS_JSON (default: false)
-    replace_gluetun_servers_json_env = os.environ.get("REPLACE_GLUETUN_SERVERS_JSON", "false").lower()
-    replace_gluetun_servers_json = replace_gluetun_servers_json_env in ("1", "true", "yes")
+    # Resolve credentials without interactive prompts (env var → Docker secret)
+    username = os.environ.get("PROTON_USERNAME") or _read_secret("proton_username")
+    password = os.environ.get("PROTON_PASSWORD") or _read_secret("proton_password")
 
     # Parse STORAGE_FILEPATH (directory for output file) - REQUIRED
     storage_path = os.environ.get("STORAGE_FILEPATH")
@@ -1033,14 +1448,41 @@ async def main():
         print("Error: STORAGE_FILEPATH environment variable is required.", file=sys.stderr)
         sys.exit(1)
 
-    # Parse DEBUG (default: false)
-    debug_env = os.environ.get("DEBUG", "false").lower()
-    debug = debug_env in ("1", "true", "yes")
+    # Build seed defaults from env vars (applied only when config.yaml does not yet exist)
+    _three_way = ("include", "exclude", "only")
 
-    # Parse DEBUG_DIR (default: STORAGE_FILEPATH/debug)
-    debug_dir = os.environ.get("DEBUG_DIR")
-    if debug and not debug_dir:
-        debug_dir = os.path.join(storage_path, "debug")
+    def _env_three(env_name: str, default: str) -> str:
+        v = os.environ.get(env_name, default).lower()
+        return v if v in _three_way else default
+
+    gluetun_json_env = os.environ.get("GLUETUN_SERVERS_JSON", "").lower()
+    if not gluetun_json_env:
+        legacy = os.environ.get("REPLACE_GLUETUN_SERVERS_JSON", "false").lower()
+        gluetun_json_seed = "replace" if legacy in ("1", "true", "yes") else "none"
+        if gluetun_json_seed == "replace":
+            print("Warning: REPLACE_GLUETUN_SERVERS_JSON is deprecated. Use GLUETUN_SERVERS_JSON=replace instead.", file=sys.stderr)
+    else:
+        if gluetun_json_env not in ("none", "replace", "update"):
+            print(f"Warning: Invalid GLUETUN_SERVERS_JSON value '{gluetun_json_env}'. Using 'none'.", file=sys.stderr)
+        gluetun_json_seed = gluetun_json_env if gluetun_json_env in ("none", "replace", "update") else "none"
+
+    env_defaults = {
+        "ip6": _env_three("IP6", "exclude"),
+        "secure_core": _env_three("SECURE_CORE", "include"),
+        "tor": _env_three("TOR", "include"),
+        "free_tier": _env_three("FREE_TIER", "include"),
+        "gluetun_json": gluetun_json_seed,
+    }
+
+    # Load (or create) the persistent filter config from STORAGE_FILEPATH/proton/config.yaml
+    cache_dir = Path(storage_path) / "proton"
+    filter_config = _load_or_create_filter_config(cache_dir, env_defaults)
+
+    ipv6_filter = filter_config["ip6"]
+    secure_core_filter = filter_config["secure_core"]
+    tor_filter = filter_config["tor"]
+    free_tier_filter = filter_config["free_tier"]
+    gluetun_json_mode = filter_config["gluetun_json"]
 
     # Parse WEB_HOST (default 127.0.0.1 for security)
     web_host = os.environ.get("WEB_HOST", "127.0.0.1")
@@ -1059,61 +1501,138 @@ async def main():
         loop.add_signal_handler(sig, stop_event.set)
 
     runtime = _Status(
-        config_ip6=ipv6_filter,
-        config_secure_core=secure_core_filter,
-        config_tor=tor_filter,
-        config_free_tier=free_tier_filter,
-        config_replace_json=replace_gluetun_servers_json,
-        config_debug=debug,
+        config=_Config(
+            ip6=ipv6_filter,
+            secure_core=secure_core_filter,
+            tor=tor_filter,
+            free_tier=free_tier_filter,
+            replace_json=gluetun_json_mode == "replace",  # backward compat display
+            gluetun_json=gluetun_json_mode,
+        ),
+        cache_dir=cache_dir,
     )
-    broker = _TwoFABroker()
+    broker = _TfaBroker()
     web_server = await _start_web_server(web_host, web_port, runtime, broker)
 
-    if _missing_creds:
-        runtime.last_error = (
-            f"Warning: {', '.join(_missing_creds)} not set — credentials were entered interactively. "
-            "Set these environment variables to run unattended."
+    # Check credentials now that the web server is up so errors are visible on the dashboard
+    _missing = []
+    if not username:
+        _missing.append("PROTON_USERNAME (env var or Docker secret: proton_username)")
+    if not password:
+        _missing.append("PROTON_PASSWORD (env var or Docker secret: proton_password)")
+    if _missing:
+        msg = (
+            "\u26a0 Missing required credentials: " + ", ".join(_missing) + ". "
+            "Restart the container after setting these environment variables or Docker secrets."
         )
+        print(f"Error: {msg}", file=sys.stderr)
+        runtime.state = "error"
+        runtime.last_error = msg
+        runtime.configuration_error = True
+        await stop_event.wait()
+        runtime.state = "shutting_down"
+        web_server.close()
+        await web_server.wait_closed()
+        return
 
     runtime.state = "authenticating"
     session = await _authenticate(username, password)
+    first_run = True
     try:
         while not stop_event.is_set():
-            try:
-                await run_update(
-                    session, storage_path, ipv6_filter,
-                    secure_core_filter, tor_filter, free_tier_filter,
-                    replace_gluetun_servers_json, debug, debug_dir,
-                    status=runtime, broker=broker,
+            force = runtime.force_fetch.is_set()
+            runtime.force_fetch.clear()
+
+            # On the very first iteration, skip the update if the cached server
+            # list is still fresh (< 12 h).  The user can trigger a fetch manually
+            # via the "Fetch Now" button.  After the first sleep we always fetch.
+            if first_run and not force and _load_cached_api(storage_path) is not None:
+                cached_result = _load_cached_api(storage_path)
+                cache_ts = int(cached_result[1].stem.split(".", 1)[1])
+                age_min = int((time.time() - cache_ts) / 60)
+                print(
+                    f"Startup: cache is {age_min} min old (< 12 h) — skipping initial fetch. "
+                    "Use 'Fetch Now' to pull a fresh server list.",
+                    file=sys.stderr,
                 )
-            except Exception as e:
-                runtime.state = "error"
-                runtime.last_error = str(e)
-                print(f"\nError during update: {e}", file=sys.stderr)
-                # Wait 5 minutes before retry, but still respond to stop signal
-                print("Waiting 5 minutes before retry...", file=sys.stderr)
+                # Populate last-run stats from the cached API data + existing output file
+                output_file = os.path.join(storage_path, "servers-proton.json")
                 try:
-                    await asyncio.wait_for(stop_event.wait(), timeout=300)
-                except asyncio.TimeoutError:
-                    pass
-                continue
+                    _, startup_stats = transform(
+                        cached_result[0],
+                        ipv6_filter=runtime.config.ip6,
+                        secure_core_filter=runtime.config.secure_core,
+                        tor_filter=runtime.config.tor,
+                        free_tier_filter=runtime.config.free_tier,
+                    )
+                    with open(output_file, encoding="utf-8") as _f:
+                        _existing = json.load(_f)
+                    runtime.last_server_count = len(_existing.get("protonvpn", {}).get("servers", []))
+                    runtime.last_stats = startup_stats
+                    runtime.last_run_time = float(cache_ts)
+                except Exception as _e:
+                    print(f"Startup: could not populate stats from cache: {_e}", file=sys.stderr)
+                runtime.state = "sleeping"
+                first_run = False
+            else:
+                first_run = False
+                try:
+                    await run_update(
+                        session, storage_path,
+                        runtime.config.ip6, runtime.config.secure_core,
+                        runtime.config.tor, runtime.config.free_tier,
+                        runtime.config.gluetun_json,
+                        status=runtime, broker=broker,
+                        force_fetch=force,
+                    )
+                except Exception as e:
+                    runtime.state = "error"
+                    runtime.last_error = str(e)
+                    print(f"\nError during update: {e}", file=sys.stderr)
+                    # Wait 5 minutes before retry, but still respond to stop signal
+                    print("Waiting 5 minutes before retry...", file=sys.stderr)
+                    try:
+                        await asyncio.wait_for(stop_event.wait(), timeout=300)
+                    except asyncio.TimeoutError:
+                        pass
+                    continue
 
             if stop_event.is_set():
                 break
 
-            # Calculate random sleep interval between 12 and 36 hours (in seconds)
-            sleep_hours = random.uniform(12, 36)
-            sleep_seconds = sleep_hours * 3600
+            # Sleep until next scheduled fetch.  When the first run was skipped
+            # because the cache is still fresh, sleep only until the cache expires
+            # (plus a random jitter of 0–4 h) so the next fetch stays aligned.
+            cached_for_sleep = _load_cached_api(storage_path)
+            if cached_for_sleep is not None:
+                cache_ts = int(cached_for_sleep[1].stem.split(".", 1)[1])
+                cache_expires_in = _CACHE_MAX_AGE_SECONDS - (time.time() - cache_ts)
+                sleep_seconds = max(60, cache_expires_in) + random.uniform(0, 4 * 3600)
+            else:
+                sleep_hours = random.uniform(12, 36)
+                sleep_seconds = sleep_hours * 3600
             next_run_time = time.time() + sleep_seconds
             next_run_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(next_run_time))
 
             runtime.state = "sleeping"
             runtime.next_run_time = next_run_time
-            print(f"\nSleeping for {sleep_hours:.2f} hours. Next run at {next_run_str}", file=sys.stderr)
-            try:
-                await asyncio.wait_for(stop_event.wait(), timeout=sleep_seconds)
-            except asyncio.TimeoutError:
-                pass  # Normal timeout, continue to next run
+            print(f"\nSleeping {sleep_seconds/3600:.2f} h. Next run at {next_run_str}", file=sys.stderr)
+            # Wake early on stop or force-refresh
+            while not stop_event.is_set() and not runtime.force_fetch.is_set():
+                try:
+                    remaining = runtime.next_run_time - time.time()
+                    if remaining <= 0:
+                        break
+                    await asyncio.wait_for(
+                        asyncio.shield(asyncio.gather(
+                            stop_event.wait(), runtime.force_fetch.wait(),
+                            return_exceptions=True,
+                        )),
+                        timeout=min(remaining, 30),
+                    )
+                    break
+                except asyncio.TimeoutError:
+                    pass  # keep looping to re-check remaining time
     finally:
         runtime.state = "shutting_down"
         web_server.close()

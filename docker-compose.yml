@@ -1,12 +1,20 @@
+secrets:
+  proton_username:
+    file: ./secrets/proton_username.txt  # OPTIONAL: Alternative to PROTON_USERNAME env var
+  proton_password:
+    file: ./secrets/proton_password.txt  # OPTIONAL: Alternative to PROTON_PASSWORD env var
+
 services:
   gtupdate:
     image: ghcr.io/warrentc3/proton-gluetun-updater:latest
     container_name: protonvpn-gluetun-updater
     volumes:
       - /path/to/gluetun:/gluetun  # Mandatory: Set this to your gluetun configuration directory
-      - /path/to/debug:/debug # Optional: Set this to a directory to store debug logs if DEBUG is enabled.  When DEBUG=true and DEBUG_DIR is unset, defaults to STORAGE_FILEPATH/debug subdirectory.
     ports:
       - "8080:8080" # OPTIONAL: Web dashboard port. Change left side to remap host port.
+    # secrets:         # OPTIONAL: Uncomment to use Docker secrets instead of env vars for credentials
+    #   - proton_username
+    #   - proton_password
     env_file:
       - .env
     environment:
@@ -14,9 +22,8 @@ services:
       SECURE_CORE: include # OPTIONAL: Filter Secure Core servers: include (default), exclude, or only
       TOR: include # OPTIONAL: Filter TOR servers: include (default), exclude, or only
       FREE_TIER: include # OPTIONAL: Filter free tier servers: include (default), exclude, or only
-      REPLACE_GLUETUN_SERVERS_JSON: false # OPTIONAL: Replace servers.json with servers-proton.json. Defaults to false if not set.
+      GLUETUN_SERVERS_JSON: none # OPTIONAL: How to update Gluetun's servers.json: none (default, don't touch it), replace (overwrite entirely with ProtonVPN-only content), or update (merge ProtonVPN servers in, preserving all other providers)
+      # REPLACE_GLUETUN_SERVERS_JSON: false # DEPRECATED: Use GLUETUN_SERVERS_JSON=replace instead
       WEB_HOST: 0.0.0.0 # OPTIONAL: Dashboard bind address. Defaults to 127.0.0.1 (localhost-only). Use 0.0.0.0 to expose publicly.
       WEB_PORT: 8080 # OPTIONAL: Port for the web dashboard. Defaults to 8080 if not set.
       IP6: exclude # OPTIONAL: IPv6 behavior: exclude (default), include, or only
-      DEBUG: false # OPTIONAL: Enable debug logging. Defaults to false if not set.
-      DEBUG_DIR: /debug # OPTIONAL: Set this to a directory to store debug logs if DEBUG is enabled.  When DEBUG=true and DEBUG_DIR is unset, defaults to STORAGE_FILEPATH/debug subdirectory.
