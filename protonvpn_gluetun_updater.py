@@ -332,9 +332,8 @@ _HTML_PAGE = """\
     <div class="grid" id="status_grid">
       <div id="status_badge" class="badge s-starting">starting</div>
       <div class="stat"><label>Uptime</label><span class="val" id="uptime">&#x2014;</span></div>
-      <div class="stat"><label>Last Run</label><span class="val" id="last_run">&#x2014;</span></div>
+      <div class="stat"><label>Last Fetch</label><span class="val" id="last_run">&#x2014;</span></div>
       <div class="stat"><label>Next Run</label><span class="val" id="next_run">&#x2014;</span></div>
-      <div class="stat"><label>Servers Written</label><span class="val" id="server_count">&#x2014;</span></div>
     </div>
     <div style="margin-top:.8rem;display:flex;align-items:center;gap:.6rem">
       <button class="refresh-btn" type="button" id="refresh_btn">&#x21bb; Fetch Now</button>
@@ -376,7 +375,7 @@ _HTML_PAGE = """\
     </form>
   </details>
   <details class="card" id="stats_card" style="display:none">
-    <summary id="stats_heading" class="section-heading">Last Run Statistics</summary>
+    <summary id="stats_heading" class="section-heading">Last Run Statistics<span id="server_count" style="font-weight:normal;font-size:.85em;margin-left:.75em;opacity:.75"></span></summary>
     <table class="stats-tbl">
       <thead><tr><th>Category</th><th>Total</th><th>In Output</th></tr></thead>
       <tbody id="stats_body"></tbody>
@@ -415,7 +414,6 @@ _HTML_PAGE = """\
           else{nextRunText=h>0?h+'h '+m+'m':m+'m';}
           set('next_run',nextRunText);
         }else{set('next_run',null);}
-        set('server_count',d.server_count);
         var cb=document.getElementById('cfg_banner');
         if(d.configuration_error){cb.style.display='block';cb.textContent=d.last_error||'Missing credentials — restart the container after setting PROTON_USERNAME and PROTON_PASSWORD.';}
         else{cb.style.display='none';}
@@ -427,6 +425,8 @@ _HTML_PAGE = """\
         var sn=document.getElementById('stats_notes');
         if(d.stats&&d.stats.rows&&d.stats.rows.length){
           sc.style.display='block';sb.innerHTML='';
+          var scSpan=document.getElementById('server_count');
+          if(scSpan)scSpan.textContent=d.server_count!=null?'\u2014 '+d.server_count.toLocaleString()+' servers':'';
           d.stats.rows.forEach(function(r){
             var cls=r.total===r.out?'match':'diff';
             sb.innerHTML+='<tr><td>'+r.label+'</td><td>'+r.total.toLocaleString()+'</td><td class="'+cls+'">'+r.out.toLocaleString()+'</td></tr>';
@@ -1289,7 +1289,6 @@ def _reprocess_from_cache(
             _atomic_write(servers_json_file, merged)
             print(f"Apply: updated protonvpn servers in {servers_json_file}", file=sys.stderr)
     if status is not None:
-        status.last_run_time = time.time()
         status.last_server_count = count
         status.last_stats = transform_stats
     return True
@@ -1336,6 +1335,7 @@ async def run_update(
         status.next_run_time = None
 
     cached = _load_cached_api(storage_path)
+    fetched_fresh = False
     if cached is not None and not force_fetch:
         api_data, cache_path = cached
         age_min = int((time.time() - int(cache_path.stem.split(".", 1)[1])) / 60)
@@ -1345,6 +1345,7 @@ async def run_update(
             print("Force-fetch requested — bypassing cache.", file=sys.stderr)
         api_data = await _fetch_server_list(session, broker=broker, status=status)
         _save_api_cache(api_data, storage_path)
+        fetched_fresh = True
     
     result, transform_stats = transform(api_data, ipv6_filter=ipv6_filter, secure_core_filter=secure_core_filter, tor_filter=tor_filter, free_tier_filter=free_tier_filter)
 
@@ -1395,10 +1396,11 @@ async def run_update(
             print(f"Updated protonvpn servers in {servers_json_file}", file=sys.stderr)
 
     if status is not None:
-        status.last_run_time = time.time()
+        if fetched_fresh:
+            status.last_run_time = time.time()
+            status.run_count += 1
         status.last_server_count = count
         status.last_stats = transform_stats
-        status.run_count += 1
 
 
 async def main():
