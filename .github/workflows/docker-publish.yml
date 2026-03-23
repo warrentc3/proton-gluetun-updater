@@ -13,7 +13,7 @@ on:
 
 concurrency:
   group: docker-build-${{ github.sha }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 env:
   REGISTRY: ghcr.io
