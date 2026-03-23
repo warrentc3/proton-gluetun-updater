@@ -18,10 +18,16 @@ A companion container for [Gluetun](https://github.com/qdm12/gluetun) that autom
 
 ---
 
-## Quick start
+## Example Compose yaml
+Credentials can be supplied via [Docker secrets](https://docs.docker.com/compose/how-tos/use-secrets/) instead of environment variables, keeping them out of `docker inspect` output and compose files.
 
+Standalone Example:
 ```yaml
-# docker-compose.yml
+#secrets:
+#  proton_username:
+#    file: ./secrets/proton_username.txt
+#  proton_password:
+#    file: ./secrets/proton_password.txt
 services:
   gtupdate:
     image: ghcr.io/warrentc3/proton-gluetun-updater:latest
@@ -30,12 +36,49 @@ services:
       - /path/to/gluetun:/gluetun
     ports:
       - "127.0.0.1:8080:8080"
+    #secrets:
+    #  - proton_username
+    #  - proton_password
     environment:
       PROTON_USERNAME: your@email.com
       PROTON_PASSWORD: yourpassword
       STORAGE_FILEPATH: /gluetun
       GLUETUN_SERVERS_JSON: update   # merge ProtonVPN servers into servers.json
       WEB_HOST: 0.0.0.0
+      WEB_PORT: 8080
+```
+
+
+Container-Attached Networking Example:
+```yaml
+services:
+  gluetun:
+    container_name: gluetun
+    image: ghcr.io/qdm12/gluetun:latest
+    ports:
+      - ${WEB_PORT}:${WEB_PORT}
+    ...
+    environment:
+      STORAGE_FILEPATH: /gluetun/servers.json
+      ...
+    volumes:
+      - /path/to/gluetun:/gluetun
+  gtupdate:
+    image: ghcr.io/warrentc3/proton-gluetun-updater:latest
+    container_name: protonvpn-gluetun-updater
+    network_mode: "service:gluetun"
+    depends_on:
+      gluetun:
+        condition: service_healthy
+        restart: true
+    volumes:
+      - /path/to/gluetun:/gluetun
+    environment:
+      PROTON_USERNAME: your@email.com
+      PROTON_PASSWORD: yourpassword
+      STORAGE_FILEPATH: /gluetun/servers.json
+      WEB_HOST: 0.0.0.0
+      WEB_PORT: 8080
 ```
 
 Set `STORAGE_FILEPATH` to Gluetun's data directory — or directly to `servers.json` inside it (e.g. `/gluetun/servers.json`). When a file path is given, the parent directory is inferred automatically. The updater writes `servers-proton.json` there and, when `GLUETUN_SERVERS_JSON` is not `none`, also updates `servers.json`.
@@ -67,7 +110,7 @@ These filter variables are only applied **when `config.yaml` does not yet exist*
 
 ## Docker secrets
 
-Credentials can be supplied via [Docker secrets](https://docs.docker.com/compose/how-tos/use-secrets/) instead of environment variables, keeping them out of `docker inspect` output and compose files:
+
 
 ```yaml
 secrets:
