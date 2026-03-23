@@ -48,17 +48,20 @@ Set `STORAGE_FILEPATH` to Gluetun's data directory — or directly to `servers.j
 | --- | --- | --- | --- |
 | `PROTON_USERNAME` | Yes* | — | Proton account username. Can be omitted when the `proton_username` Docker secret is used. |
 | `PROTON_PASSWORD` | Yes* | — | Proton account password. Can be omitted when the `proton_password` Docker secret is used. |
-| `STORAGE_FILEPATH` | Yes | — | Directory path for output files and cache. If a file path is given (e.g. `/gluetun/servers.json`), the parent directory is used automatically — making it easy to point directly at Gluetun's `servers.json` when running in the same stack. |
+| `STORAGE_FILEPATH` | Yes | — | Intentionally used the same variable name as the Gluetun container, which maps to `/gluetun/servers.json`. |
 | `WEB_HOST` | No | `127.0.0.1` | Dashboard bind address. Set to `0.0.0.0` to expose inside Docker (control access via port binding or a reverse proxy). |
 | `WEB_PORT` | No | `8080` | Dashboard port. |
+
+These filter variables are only applied **when `config.yaml` does not yet exist**. Once the file is created (first run), the dashboard controls or direct edits to `config.yaml` take precedence.
+| Variable | Required | Default | Description |
+| --- | --- | --- | --- |
 | `GLUETUN_SERVERS_JSON` | No | `none` | How to handle Gluetun's `servers.json`: `none` (don't touch it), `replace` (overwrite entirely with ProtonVPN-only content), or `update` (merge ProtonVPN servers in, preserving all other providers). |
 | `IP6` | No | `exclude` | IPv6 behavior: `include` (add IPv6 IPs to each server entry), `exclude` (strip IPv6 from output), or `only` (only output servers that have an IPv6 address). IPv6 data is always fetched from the API regardless of this setting. |
 | `SECURE_CORE` | No | `include` | Filter for Secure Core servers: `include`, `exclude`, or `only`. |
 | `TOR` | No | `include` | Filter for TOR servers: `include`, `exclude`, or `only`. |
 | `FREE_TIER` | No | `include` | Filter for free-tier servers: `include`, `exclude`, or `only`. |
-| `REPLACE_GLUETUN_SERVERS_JSON` | No | — | **Deprecated.** Use `GLUETUN_SERVERS_JSON=replace` instead. Still accepted for backward compatibility. |
 
-Filter environment variables are only applied **when `config.yaml` does not yet exist**. Once the file is created, the dashboard controls or direct edits to `config.yaml` take precedence.
+
 
 ---
 
