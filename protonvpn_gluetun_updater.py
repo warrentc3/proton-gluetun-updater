@@ -34,7 +34,7 @@ from urllib.parse import parse_qs
 import yaml
 
 from proton.session import Session
-from proton.session.exceptions import ProtonAPI2FANeeded
+from proton.session.exceptions import ProtonAPI2FANeeded, ProtonAPIAuthenticationNeeded
 
 APP_VERSION = "linux-vpn-cli@4.15.2"
 USER_AGENT = "ProtonVPN/4.15.2 (Linux)"
@@ -125,6 +125,7 @@ class _Config:
     tor: str = "include"
     free_tier: str = "include"
     gluetun_json: str = "none"  # none|replace|update
+    auto_fetch: str = "off"    # off|on
 
 
 @dataclasses.dataclass
@@ -132,7 +133,7 @@ class _Status:
     """Mutable runtime state surfaced on the web dashboard."""
     config: _Config = dataclasses.field(default_factory=_Config)
     start_time: float = dataclasses.field(default_factory=time.time)
-    state: str = "starting"     # starting|authenticating|running|sleeping|waiting_tfa|error|shutting_down
+    state: str = "starting"     # starting|authenticating|running|sleeping|idle|waiting_tfa|error|shutting_down
     last_run_time: float | None = None
     next_run_time: float | None = None
     last_server_count: int | None = None
@@ -204,6 +205,7 @@ _HTML_PAGE = """\
     .s-authenticating{background:#1e293b;color:#93c5fd;animation:pulse 1.2s ease-in-out infinite}
     .s-running{background:#14532d;color:#86efac;animation:pulse 1.2s ease-in-out infinite}
     .s-sleeping{background:#1e3a5f;color:#7dd3fc}
+    .s-idle{background:#1e293b;color:#94a3b8}
     .s-waiting_tfa{background:#451a03;color:#fdba74;animation:pulse 1s ease-in-out infinite}
     .s-error{background:#450a0a;color:#fca5a5}
     @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
@@ -366,6 +368,8 @@ _HTML_PAGE = """\
         <select id="sel_free_tier" name="free_tier"><option>include</option><option>exclude</option><option>only</option></select></div>
       <div class="filter-item" id="fi_gluetun_json"><label for="sel_gluetun_json">Gluetun JSON</label>
         <select id="sel_gluetun_json" name="gluetun_json"><option>none</option><option>replace</option><option>update</option></select></div>
+      <div class="filter-item" id="fi_auto_fetch"><label for="sel_auto_fetch">Auto Fetch</label>
+        <select id="sel_auto_fetch" name="auto_fetch"><option>off</option><option>on</option></select></div>
     </div>
     <div class="cfg-apply">
       <button class="cfg-apply-btn" type="submit">Apply</button>
@@ -469,7 +473,7 @@ _HTML_PAGE = """\
         if(d.tfa_message){tm.style.display='block';tm.textContent=d.tfa_message;}
         else{tm.style.display='none';}
         if(d.config){
-          var selMap={ip6:'sel_ip6',secure_core:'sel_secure_core',tor:'sel_tor',free_tier:'sel_free_tier',gluetun_json:'sel_gluetun_json'};
+          var selMap={ip6:'sel_ip6',secure_core:'sel_secure_core',tor:'sel_tor',free_tier:'sel_free_tier',gluetun_json:'sel_gluetun_json',auto_fetch:'sel_auto_fetch'};
           Object.keys(selMap).forEach(function(k){
             var el=document.getElementById(selMap[k]);
             if(el&&d.config[k]!=null&&document.activeElement!==el)el.value=d.config[k];
@@ -644,6 +648,17 @@ async def _web_handler(
         if method == "GET" and path in ("/", ""):
             _http_respond(writer, "200 OK", "text/html; charset=utf-8", _HTML_PAGE)
 
+        elif method == "GET" and path == "/health":
+            healthy = not (
+                runtime.config.auto_fetch == "on"
+                and runtime.state == "error"
+                and runtime.last_error
+                and "Re-authentication failed" in runtime.last_error
+            )
+            status_code = "200 OK" if healthy else "503 Service Unavailable"
+            payload = json.dumps({"healthy": healthy, "state": runtime.state})
+            _http_respond(writer, status_code, "application/json", payload)
+
         elif method == "GET" and path == "/status":
             payload = json.dumps({
                 "state": runtime.state,
@@ -667,6 +682,7 @@ async def _web_handler(
                     "tor": runtime.config.tor,
                     "free_tier": runtime.config.free_tier,
                     "gluetun_json": runtime.config.gluetun_json,
+                    "auto_fetch": runtime.config.auto_fetch,
                 },
             })
             _http_respond(writer, "200 OK", "application/json", payload)
@@ -681,6 +697,7 @@ async def _web_handler(
                 "tor": _fv("tor"),
                 "free_tier": _fv("free_tier"),
                 "gluetun_json": _fv("gluetun_json"),
+                "auto_fetch": _fv("auto_fetch"),
             }
             errors = [
                 f"'{k}' must be one of {_FILTER_CHOICES[k]}, got '{v}'"
@@ -698,6 +715,7 @@ async def _web_handler(
                 runtime.config.tor = new_vals["tor"]
                 runtime.config.free_tier = new_vals["free_tier"]
                 runtime.config.gluetun_json = new_vals["gluetun_json"]
+                runtime.config.auto_fetch = new_vals["auto_fetch"]
                 _http_respond(writer, "200 OK", "application/json", '{"ok":true}')
 
         elif method == "POST" and path == "/reprocess":
@@ -718,7 +736,7 @@ async def _web_handler(
                     _http_respond(writer, "500 Internal Server Error", "text/plain", str(_rpe))
 
         elif method == "POST" and path == "/refresh":
-            if runtime.state in ("sleeping", "error"):
+            if runtime.state in ("sleeping", "error", "idle"):
                 runtime.force_fetch.set()
                 _http_respond(writer, "200 OK", "application/json", '{"ok":true}')
             elif runtime.state in ("running", "authenticating", "waiting_tfa"):
@@ -1131,6 +1149,7 @@ _FILTER_DEFAULTS: dict[str, str] = {
     "tor": "include",
     "free_tier": "include",
     "gluetun_json": "none",
+    "auto_fetch": "off",
 }
 
 _FILTER_CHOICES: dict[str, tuple[str, ...]] = {
@@ -1139,6 +1158,7 @@ _FILTER_CHOICES: dict[str, tuple[str, ...]] = {
     "tor": ("include", "exclude", "only"),
     "free_tier": ("include", "exclude", "only"),
     "gluetun_json": ("none", "replace", "update"),
+    "auto_fetch": ("off", "on"),
 }
 
 
@@ -1148,6 +1168,7 @@ def _save_filter_config(config_file: Path, values: dict) -> None:
         "# ProtonVPN Gluetun Updater — filter configuration\n"
         "# ip6, secure_core, tor, free_tier: include | exclude | only\n"
         "# gluetun_json: none | replace | update\n"
+        "# auto_fetch: off (run once, fetch manually) | on (recurring fetch with session keep-alive)\n"
     )
     with open(config_file, "w", encoding="utf-8") as f:
         f.write(header)
@@ -1451,6 +1472,7 @@ async def main():
         "tor": _env_three("TOR", "include"),
         "free_tier": _env_three("FREE_TIER", "include"),
         "gluetun_json": gluetun_json_seed,
+        "auto_fetch": os.environ.get("AUTO_FETCH", "off").lower(),
     }
 
     # Load (or create) the persistent filter config from STORAGE_FILEPATH/proton/config.yaml
@@ -1486,6 +1508,7 @@ async def main():
             tor=tor_filter,
             free_tier=free_tier_filter,
             gluetun_json=gluetun_json_mode,
+            auto_fetch=filter_config["auto_fetch"],
         ),
         cache_dir=cache_dir,
     )
@@ -1549,7 +1572,6 @@ async def main():
                     runtime.last_run_time = float(cache_ts)
                 except Exception as _e:
                     print(f"Startup: could not populate stats from cache: {_e}", file=sys.stderr)
-                runtime.state = "sleeping"
                 first_run = False
             else:
                 first_run = False
@@ -1562,6 +1584,30 @@ async def main():
                         status=runtime, broker=broker,
                         force_fetch=force,
                     )
+                except ProtonAPIAuthenticationNeeded:
+                    print(
+                        "\nSession expired (refresh token invalid). "
+                        "Re-authenticating...",
+                        file=sys.stderr,
+                    )
+                    runtime.state = "authenticating"
+                    try:
+                        session = await _authenticate(username, password)
+                    except Exception as auth_err:
+                        runtime.state = "error"
+                        runtime.last_error = f"Re-authentication failed: {auth_err}"
+                        print(
+                            f"Error: re-authentication failed: {auth_err}",
+                            file=sys.stderr,
+                        )
+                        print("Waiting 5 minutes before retry...", file=sys.stderr)
+                        try:
+                            await asyncio.wait_for(stop_event.wait(), timeout=300)
+                        except asyncio.TimeoutError:
+                            pass
+                        continue
+                    print("Re-authentication successful. Retrying...", file=sys.stderr)
+                    continue
                 except Exception as e:
                     runtime.state = "error"
                     runtime.last_error = str(e)
@@ -1577,39 +1623,75 @@ async def main():
             if stop_event.is_set():
                 break
 
-            # Sleep until next scheduled fetch.  When the first run was skipped
-            # because the cache is still fresh, sleep only until the cache expires
-            # (plus a random jitter of 0–4 h) so the next fetch stays aligned.
-            cached_for_sleep = _load_cached_api(storage_path)
-            if cached_for_sleep is not None:
-                cache_ts = int(cached_for_sleep[1].stem.split(".", 1)[1])
-                cache_expires_in = _CACHE_MAX_AGE_SECONDS - (time.time() - cache_ts)
-                sleep_seconds = max(60, cache_expires_in) + random.uniform(0, 4 * 3600)
-            else:
-                sleep_hours = random.uniform(12, 36)
-                sleep_seconds = sleep_hours * 3600
-            next_run_time = time.time() + sleep_seconds
-            next_run_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(next_run_time))
-
-            runtime.state = "sleeping"
-            runtime.next_run_time = next_run_time
-            print(f"\nSleeping {sleep_seconds/3600:.2f} h. Next run at {next_run_str}", file=sys.stderr)
-            # Wake early on stop or force-refresh
-            while not stop_event.is_set() and not runtime.force_fetch.is_set():
-                try:
-                    remaining = runtime.next_run_time - time.time()
-                    if remaining <= 0:
+            # --- Mode-aware post-fetch behavior ---
+            if runtime.config.auto_fetch == "off":
+                # Run-once mode: sit idle until user triggers "Fetch Now" or stop
+                runtime.state = "idle"
+                runtime.next_run_time = None
+                print("\nIdle — use 'Fetch Now' to update.", file=sys.stderr)
+                while not stop_event.is_set() and not runtime.force_fetch.is_set():
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.shield(asyncio.gather(
+                                stop_event.wait(), runtime.force_fetch.wait(),
+                                return_exceptions=True,
+                            )),
+                            timeout=30,
+                        )
                         break
-                    await asyncio.wait_for(
-                        asyncio.shield(asyncio.gather(
-                            stop_event.wait(), runtime.force_fetch.wait(),
-                            return_exceptions=True,
-                        )),
-                        timeout=min(remaining, 30),
-                    )
-                    break
-                except asyncio.TimeoutError:
-                    pass  # keep looping to re-check remaining time
+                    except asyncio.TimeoutError:
+                        pass
+            else:
+                # Auto-fetch mode: sleep until next scheduled fetch with session keep-alive
+                cached_for_sleep = _load_cached_api(storage_path)
+                if cached_for_sleep is not None:
+                    cache_ts = int(cached_for_sleep[1].stem.split(".", 1)[1])
+                    cache_expires_in = _CACHE_MAX_AGE_SECONDS - (time.time() - cache_ts)
+                    sleep_seconds = max(60, cache_expires_in) + random.uniform(0, 4 * 3600)
+                else:
+                    sleep_hours = random.uniform(12, 36)
+                    sleep_seconds = sleep_hours * 3600
+                next_run_time = time.time() + sleep_seconds
+                next_run_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(next_run_time))
+
+                runtime.state = "sleeping"
+                runtime.next_run_time = next_run_time
+                print(f"\nSleeping {sleep_seconds/3600:.2f} h. Next run at {next_run_str}", file=sys.stderr)
+
+                # Session keep-alive: ping the API at randomized intervals (30-55 min,
+                # biased high) to trigger proton-core's built-in token refresh on 401.
+                last_keepalive = time.time()
+                keepalive_interval = max(random.randint(30, 55) for _ in range(3)) * 60
+
+                while not stop_event.is_set() and not runtime.force_fetch.is_set():
+                    try:
+                        remaining = runtime.next_run_time - time.time()
+                        if remaining <= 0:
+                            break
+                        await asyncio.wait_for(
+                            asyncio.shield(asyncio.gather(
+                                stop_event.wait(), runtime.force_fetch.wait(),
+                                return_exceptions=True,
+                            )),
+                            timeout=min(remaining, 30),
+                        )
+                        break
+                    except asyncio.TimeoutError:
+                        # Check if session keep-alive is due
+                        if time.time() - last_keepalive >= keepalive_interval:
+                            try:
+                                await session.async_api_request(LOGICALS_ENDPOINT)
+                                last_keepalive = time.time()
+                                keepalive_interval = max(random.randint(30, 55) for _ in range(3)) * 60
+                                print("Session keep-alive ping successful.", file=sys.stderr)
+                            except ProtonAPIAuthenticationNeeded:
+                                print(
+                                    "Warning: keep-alive failed (session expired). "
+                                    "Will re-authenticate on next fetch.",
+                                    file=sys.stderr,
+                                )
+                            except Exception as ka_err:
+                                print(f"Warning: keep-alive ping failed: {ka_err}", file=sys.stderr)
     finally:
         runtime.state = "shutting_down"
         web_server.close()
