@@ -326,7 +326,7 @@
           if(afEl&&d.config.auto_fetch!=null)afEl.value=d.config.auto_fetch;
         }
         var rm=document.getElementById('reauth_msg');
-        if(rm){rm.style.display=d.needs_2fa_intervention?'block':'none';}
+        if(rm){rm.style.display=d.needs_tfa_intervention?'block':'none';}
         set('ts',new Date().toLocaleTimeString());
       }catch(e){}
     }

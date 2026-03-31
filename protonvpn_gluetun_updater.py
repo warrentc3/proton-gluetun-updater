@@ -146,7 +146,7 @@ class _Status:
     cache_dir: Path | None = None  # set after STORAGE_FILEPATH is resolved
     force_fetch: asyncio.Event = dataclasses.field(default_factory=asyncio.Event)
     reauth_failures: int = 0
-    needs_2fa_intervention: bool = False
+    needs_tfa_intervention: bool = False
 
 
 class _TfaBroker:
@@ -256,7 +256,7 @@ async def _web_handler(
                 "tfa_message": broker.message or None,
                 "configuration_error": runtime.configuration_error,
                 "stats": runtime.last_stats,
-                "needs_2fa_intervention": runtime.needs_2fa_intervention,
+                "needs_tfa_intervention": runtime.needs_tfa_intervention,
                 "reauth_failures": runtime.reauth_failures,
                 "config": {
                     "ip6": runtime.config.ip6,
@@ -415,9 +415,9 @@ async def _fetch_server_list(
         # forever.  Access the private mangled attribute defensively so a future
         # library refactor degrades gracefully (we'd just fall through and let
         # submission attempts fail with "Invalid code").
-        _2fa_info = getattr(session, '_Session__2FA', None) or {}
-        _2fa_enabled_bits = _2fa_info.get('Enabled', 0)
-        if _2fa_enabled_bits and not (_2fa_enabled_bits & 1):
+        _tfa_info = getattr(session, '_Session__2FA', None) or {}
+        _tfa_enabled_bits = _tfa_info.get('Enabled', 0)
+        if _tfa_enabled_bits and not (_tfa_enabled_bits & 1):
             raise RuntimeError(
                 "2FA is required but TOTP is not enabled on this account "
                 "(FIDO2 / hardware-key only).  Only TOTP codes are supported."
@@ -1277,7 +1277,7 @@ async def main():
             # (not a manual "Fetch Now"), skip the fetch entirely — don't
             # repeatedly create and abandon partial sessions on Proton's infra.
             if (
-                runtime.needs_2fa_intervention
+                runtime.needs_tfa_intervention
                 and runtime.config.auto_fetch == "on"
                 and not force
             ):
@@ -1286,10 +1286,10 @@ async def main():
                     "manual intervention needed. Use 'Fetch Now'.",
                     file=sys.stderr,
                 )
-            elif force and runtime.needs_2fa_intervention:
+            elif force and runtime.needs_tfa_intervention:
                 # User clicked "Fetch Now" — clear intervention flag, fresh auth
                 # with the generous startup-style 2FA window (15 min).
-                runtime.needs_2fa_intervention = False
+                runtime.needs_tfa_intervention = False
                 runtime.state = "authenticating"
                 try:
                     await session.async_logout()
@@ -1319,7 +1319,7 @@ async def main():
                 except _TfaTimeoutError as tfa_err:
                     runtime.state = "error"
                     runtime.last_error = str(tfa_err)
-                    runtime.needs_2fa_intervention = True
+                    runtime.needs_tfa_intervention = True
                     runtime.reauth_failures += 1
                     print(f"2FA timeout: {tfa_err}", file=sys.stderr)
                     await _wait_for_wakeup(stop_event, runtime.force_fetch, timeout=300)
@@ -1412,7 +1412,7 @@ async def main():
                     except _TfaTimeoutError as tfa_err:
                         runtime.state = "error"
                         runtime.last_error = str(tfa_err)
-                        runtime.needs_2fa_intervention = True
+                        runtime.needs_tfa_intervention = True
                         runtime.reauth_failures += 1
                         print(f"2FA timeout during re-auth: {tfa_err}", file=sys.stderr)
                         await _wait_for_wakeup(stop_event, runtime.force_fetch, timeout=300)
@@ -1426,7 +1426,7 @@ async def main():
                 except _TfaTimeoutError as tfa_err:
                     runtime.state = "error"
                     runtime.last_error = str(tfa_err)
-                    runtime.needs_2fa_intervention = True
+                    runtime.needs_tfa_intervention = True
                     runtime.reauth_failures += 1
                     print(f"2FA timeout: {tfa_err}", file=sys.stderr)
                     await _wait_for_wakeup(stop_event, runtime.force_fetch, timeout=300)
