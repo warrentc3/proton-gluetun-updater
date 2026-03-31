@@ -5,3 +5,4 @@ __pycache__/
 .venv/
 servers.json
 servers-proton.json
+docker-compose.local.yml

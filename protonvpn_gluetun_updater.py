@@ -34,7 +34,7 @@ from urllib.parse import parse_qs
 import yaml
 
 from proton.session import Session
-from proton.session.exceptions import ProtonAPI2FANeeded
+from proton.session.exceptions import ProtonAPI2FANeeded, ProtonAPIAuthenticationNeeded
 
 APP_VERSION = "linux-vpn-cli@4.15.2"
 USER_AGENT = "ProtonVPN/4.15.2 (Linux)"
@@ -125,6 +125,7 @@ class _Config:
     tor: str = "include"
     free_tier: str = "include"
     gluetun_json: str = "none"  # none|replace|update
+    auto_fetch: str = "off"    # off|on
 
 
 @dataclasses.dataclass
@@ -132,7 +133,7 @@ class _Status:
     """Mutable runtime state surfaced on the web dashboard."""
     config: _Config = dataclasses.field(default_factory=_Config)
     start_time: float = dataclasses.field(default_factory=time.time)
-    state: str = "starting"     # starting|authenticating|running|sleeping|waiting_tfa|error|shutting_down
+    state: str = "starting"     # starting|authenticating|running|sleeping|idle|waiting_tfa|error|shutting_down
     last_run_time: float | None = None
     next_run_time: float | None = None
     last_server_count: int | None = None
@@ -143,6 +144,8 @@ class _Status:
     configuration_error: bool = False
     cache_dir: Path | None = None  # set after STORAGE_FILEPATH is resolved
     force_fetch: asyncio.Event = dataclasses.field(default_factory=asyncio.Event)
+    reauth_failures: int = 0
+    needs_2fa_intervention: bool = False
 
 
 class _TfaBroker:
@@ -204,6 +207,7 @@ _HTML_PAGE = """\
     .s-authenticating{background:#1e293b;color:#93c5fd;animation:pulse 1.2s ease-in-out infinite}
     .s-running{background:#14532d;color:#86efac;animation:pulse 1.2s ease-in-out infinite}
     .s-sleeping{background:#1e3a5f;color:#7dd3fc}
+    .s-idle{background:#1e293b;color:#94a3b8}
     .s-waiting_tfa{background:#451a03;color:#fdba74;animation:pulse 1s ease-in-out infinite}
     .s-error{background:#450a0a;color:#fca5a5}
     @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
@@ -290,6 +294,8 @@ _HTML_PAGE = """\
     body.light .reprocess-btn:hover{background:#bbf7d0;color:#14532d}
     body.light .refresh-btn{background:#dbeafe;color:#1e40af}
     body.light .refresh-btn:hover{background:#bfdbfe;color:#1e3a8a}
+    .reauth-msg{font-size:.82rem;font-weight:700;color:#ef4444;margin-top:.6rem}
+    body.light .reauth-msg{color:#dc2626}
     footer{font-size:.7rem;color:#334155;margin-top:1.5rem}
     #theme-btn{position:fixed;top:.9rem;right:1rem;background:transparent;border:1px solid #2d3348;
       border-radius:6px;color:#64748b;font-size:1.05rem;cursor:pointer;padding:.28rem .6rem;
@@ -339,6 +345,7 @@ _HTML_PAGE = """\
       <button class="refresh-btn" type="button" id="refresh_btn">&#x21bb; Fetch Now</button>
       <span id="fetch_msg" class="cfg-msg" style="display:none"></span>
     </div>
+    <div id="reauth_msg" class="reauth-msg" style="display:none">Session expired &mdash; click Fetch Now to re-authenticate.</div>
     <div id="err" class="err" style="display:none"></div>
   </div>
   <div class="tfa" id="tfa_card">
@@ -366,6 +373,8 @@ _HTML_PAGE = """\
         <select id="sel_free_tier" name="free_tier"><option>include</option><option>exclude</option><option>only</option></select></div>
       <div class="filter-item" id="fi_gluetun_json"><label for="sel_gluetun_json">Gluetun JSON</label>
         <select id="sel_gluetun_json" name="gluetun_json"><option>none</option><option>replace</option><option>update</option></select></div>
+      <div class="filter-item" id="fi_auto_fetch"><label for="sel_auto_fetch">Auto Fetch</label>
+        <select id="sel_auto_fetch" name="auto_fetch"><option>off</option><option>on</option></select></div>
     </div>
     <div class="cfg-apply">
       <button class="cfg-apply-btn" type="submit">Apply</button>
@@ -469,12 +478,14 @@ _HTML_PAGE = """\
         if(d.tfa_message){tm.style.display='block';tm.textContent=d.tfa_message;}
         else{tm.style.display='none';}
         if(d.config){
-          var selMap={ip6:'sel_ip6',secure_core:'sel_secure_core',tor:'sel_tor',free_tier:'sel_free_tier',gluetun_json:'sel_gluetun_json'};
+          var selMap={ip6:'sel_ip6',secure_core:'sel_secure_core',tor:'sel_tor',free_tier:'sel_free_tier',gluetun_json:'sel_gluetun_json',auto_fetch:'sel_auto_fetch'};
           Object.keys(selMap).forEach(function(k){
             var el=document.getElementById(selMap[k]);
             if(el&&d.config[k]!=null&&document.activeElement!==el)el.value=d.config[k];
           });
         }
+        var rm=document.getElementById('reauth_msg');
+        if(rm){rm.style.display=d.needs_2fa_intervention?'block':'none';}
         set('ts',new Date().toLocaleTimeString());
       }catch(e){}
     }
@@ -661,12 +672,15 @@ async def _web_handler(
                 "tfa_message": broker.message or None,
                 "configuration_error": runtime.configuration_error,
                 "stats": runtime.last_stats,
+                "needs_2fa_intervention": runtime.needs_2fa_intervention,
+                "reauth_failures": runtime.reauth_failures,
                 "config": {
                     "ip6": runtime.config.ip6,
                     "secure_core": runtime.config.secure_core,
                     "tor": runtime.config.tor,
                     "free_tier": runtime.config.free_tier,
                     "gluetun_json": runtime.config.gluetun_json,
+                    "auto_fetch": runtime.config.auto_fetch,
                 },
             })
             _http_respond(writer, "200 OK", "application/json", payload)
@@ -681,6 +695,7 @@ async def _web_handler(
                 "tor": _fv("tor"),
                 "free_tier": _fv("free_tier"),
                 "gluetun_json": _fv("gluetun_json"),
+                "auto_fetch": _fv("auto_fetch"),
             }
             errors = [
                 f"'{k}' must be one of {_FILTER_CHOICES[k]}, got '{v}'"
@@ -698,6 +713,7 @@ async def _web_handler(
                 runtime.config.tor = new_vals["tor"]
                 runtime.config.free_tier = new_vals["free_tier"]
                 runtime.config.gluetun_json = new_vals["gluetun_json"]
+                runtime.config.auto_fetch = new_vals["auto_fetch"]
                 _http_respond(writer, "200 OK", "application/json", '{"ok":true}')
 
         elif method == "POST" and path == "/reprocess":
@@ -718,7 +734,7 @@ async def _web_handler(
                     _http_respond(writer, "500 Internal Server Error", "text/plain", str(_rpe))
 
         elif method == "POST" and path == "/refresh":
-            if runtime.state in ("sleeping", "error"):
+            if runtime.state in ("sleeping", "idle", "error"):
                 runtime.force_fetch.set()
                 _http_respond(writer, "200 OK", "application/json", '{"ok":true}')
             elif runtime.state in ("running", "authenticating", "waiting_tfa"):
@@ -778,10 +794,16 @@ async def _authenticate(username: str, password: str) -> Session:
     return session
 
 
+class _TfaTimeoutError(Exception):
+    """Raised when the 2FA code is not submitted within the allowed window."""
+
+
 async def _fetch_server_list(
     session: Session,
     broker: _TfaBroker | None = None,
     status: _Status | None = None,
+    stop_event: asyncio.Event | None = None,
+    tfa_timeout: float = 900,  # seconds; 900 = 15 min (startup), caller passes 300 for re-auth
 ) -> dict:
     """
     Fetch the server list using an existing authenticated session.
@@ -793,9 +815,12 @@ async def _fetch_server_list(
     the ipv6_filter is applied during transformation to include, exclude, or
     restrict output to servers with IPv6 addresses.
 
-    When a broker is provided, 2FA codes are collected via the web form and
-    invalid codes prompt a retry instead of exiting.  Without a broker (dev/
-    interactive use), a TTY stdin prompt is used.
+    When a broker is provided, 2FA codes are collected via the web form.
+    A tfa_timeout limits how long we wait for a code — on timeout, the
+    partial session is logged out (don't squat on Proton's infrastructure)
+    and _TfaTimeoutError is raised.
+
+    Without a broker (dev/interactive use), a TTY stdin prompt is used.
     """
     print("Fetching server list...", file=sys.stderr)
     try:
@@ -820,12 +845,60 @@ async def _fetch_server_list(
                 "(FIDO2 / hardware-key only).  Only TOTP codes are supported."
             )
         if broker is not None:
-            # Web dashboard path: loop until a valid code is submitted
+            # Web dashboard path: loop until a valid code is submitted or timeout
+            deadline = time.time() + tfa_timeout
             while True:
+                if stop_event is not None and stop_event.is_set():
+                    raise _TfaTimeoutError("Shutdown requested during 2FA wait.")
                 if status is not None:
                     status.state = "waiting_tfa"
-                print("Waiting for 2FA code via web dashboard...", file=sys.stderr)
-                totp_code = await broker.wait_for_code()
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    print(
+                        f"2FA timeout: no code submitted within {tfa_timeout/60:.0f} min. "
+                        "Logging out partial session.",
+                        file=sys.stderr,
+                    )
+                    try:
+                        await session.async_logout()
+                    except Exception:
+                        pass
+                    raise _TfaTimeoutError(
+                        f"2FA code not submitted within {tfa_timeout/60:.0f} minutes."
+                    )
+                print(
+                    f"Waiting for 2FA code via web dashboard "
+                    f"({remaining/60:.0f} min remaining)...",
+                    file=sys.stderr,
+                )
+                if stop_event is not None:
+                    # Race broker against stop_event so SIGTERM exits immediately
+                    broker_task = asyncio.ensure_future(broker.wait_for_code())
+                    stop_task = asyncio.ensure_future(stop_event.wait())
+                    done, pending = await asyncio.wait(
+                        {broker_task, stop_task},
+                        timeout=min(remaining, 30),
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    for t in pending:
+                        t.cancel()
+                    if pending:
+                        await asyncio.gather(*pending, return_exceptions=True)
+                    if stop_task in done:
+                        raise _TfaTimeoutError("Shutdown requested during 2FA wait.")
+                    if broker_task in done:
+                        totp_code = broker_task.result()
+                    else:
+                        continue  # timeout — re-check deadline and stop_event
+                else:
+                    # No stop_event: only wait for broker with a timeout
+                    try:
+                        totp_code = await asyncio.wait_for(
+                            broker.wait_for_code(),
+                            timeout=min(remaining, 30),
+                        )
+                    except asyncio.TimeoutError:
+                        continue  # re-check deadline
                 success = await session.async_validate_2fa_code(totp_code)
                 if success:
                     broker.message = ""  # Clear any previous error message
@@ -1131,6 +1204,7 @@ _FILTER_DEFAULTS: dict[str, str] = {
     "tor": "include",
     "free_tier": "include",
     "gluetun_json": "none",
+    "auto_fetch": "off",
 }
 
 _FILTER_CHOICES: dict[str, tuple[str, ...]] = {
@@ -1139,6 +1213,7 @@ _FILTER_CHOICES: dict[str, tuple[str, ...]] = {
     "tor": ("include", "exclude", "only"),
     "free_tier": ("include", "exclude", "only"),
     "gluetun_json": ("none", "replace", "update"),
+    "auto_fetch": ("off", "on"),
 }
 
 
@@ -1148,6 +1223,7 @@ def _save_filter_config(config_file: Path, values: dict) -> None:
         "# ProtonVPN Gluetun Updater — filter configuration\n"
         "# ip6, secure_core, tor, free_tier: include | exclude | only\n"
         "# gluetun_json: none | replace | update\n"
+        "# auto_fetch: off (run once, fetch manually) | on (recurring fetch with session keep-alive)\n"
     )
     with open(config_file, "w", encoding="utf-8") as f:
         f.write(header)
@@ -1327,6 +1403,8 @@ async def run_update(
     status: _Status | None = None,
     broker: _TfaBroker | None = None,
     force_fetch: bool = False,
+    stop_event: asyncio.Event | None = None,
+    tfa_timeout: float = 900,
 ):
     """Execute a single update cycle."""
     if status is not None:
@@ -1343,7 +1421,10 @@ async def run_update(
     else:
         if force_fetch:
             print("Force-fetch requested — bypassing cache.", file=sys.stderr)
-        api_data = await _fetch_server_list(session, broker=broker, status=status)
+        api_data = await _fetch_server_list(
+            session, broker=broker, status=status,
+            stop_event=stop_event, tfa_timeout=tfa_timeout,
+        )
         _save_api_cache(api_data, storage_path)
         fetched_fresh = True
     
@@ -1403,6 +1484,42 @@ async def run_update(
         status.last_stats = transform_stats
 
 
+async def _wait_for_wakeup(
+    stop_event: asyncio.Event,
+    force_fetch: asyncio.Event,
+    timeout: float | None = None,
+) -> None:
+    """
+    Wait until stop_event or force_fetch fires, or timeout expires.
+    If timeout is None, wait indefinitely (idle mode).
+    Polls every 30 s so the event loop stays responsive.
+    """
+    deadline = time.time() + timeout if timeout is not None else None
+    while not stop_event.is_set() and not force_fetch.is_set():
+        if deadline is not None:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                break
+            wait_time = min(remaining, 30)
+        else:
+            wait_time = 30
+        wait_tasks = [
+            asyncio.create_task(stop_event.wait()),
+            asyncio.create_task(force_fetch.wait()),
+        ]
+        done, pending = await asyncio.wait(
+            wait_tasks,
+            timeout=wait_time,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        if done:
+            break
+
+
 async def main():
     # Resolve credentials without interactive prompts (env var → Docker secret)
     username = os.environ.get("PROTON_USERNAME") or _read_secret("proton_username")
@@ -1445,12 +1562,18 @@ async def main():
             print(f"Warning: Invalid GLUETUN_SERVERS_JSON value '{gluetun_json_env}'. Using 'none'.", file=sys.stderr)
         gluetun_json_seed = gluetun_json_env if gluetun_json_env in ("none", "replace", "update") else "none"
 
+    auto_fetch_env = os.environ.get("AUTO_FETCH", "off").lower()
+    if auto_fetch_env not in ("off", "on"):
+        print(f"Warning: Invalid AUTO_FETCH value '{auto_fetch_env}'. Using 'off'.", file=sys.stderr)
+        auto_fetch_env = "off"
+
     env_defaults = {
         "ip6": _env_three("IP6", "exclude"),
         "secure_core": _env_three("SECURE_CORE", "include"),
         "tor": _env_three("TOR", "include"),
         "free_tier": _env_three("FREE_TIER", "include"),
         "gluetun_json": gluetun_json_seed,
+        "auto_fetch": auto_fetch_env,
     }
 
     # Load (or create) the persistent filter config from STORAGE_FILEPATH/proton/config.yaml
@@ -1486,6 +1609,7 @@ async def main():
             tor=tor_filter,
             free_tier=free_tier_filter,
             gluetun_json=gluetun_json_mode,
+            auto_fetch=filter_config["auto_fetch"],
         ),
         cache_dir=cache_dir,
     )
@@ -1521,10 +1645,67 @@ async def main():
             force = runtime.force_fetch.is_set()
             runtime.force_fetch.clear()
 
+            # When 2FA intervention is needed and this is an auto-fetch cycle
+            # (not a manual "Fetch Now"), skip the fetch entirely — don't
+            # repeatedly create and abandon partial sessions on Proton's infra.
+            if (
+                runtime.needs_2fa_intervention
+                and runtime.config.auto_fetch == "on"
+                and not force
+            ):
+                print(
+                    "Skipping scheduled fetch: re-auth requires 2FA, "
+                    "manual intervention needed. Use 'Fetch Now'.",
+                    file=sys.stderr,
+                )
+            elif force and runtime.needs_2fa_intervention:
+                # User clicked "Fetch Now" — clear intervention flag, fresh auth
+                # with the generous startup-style 2FA window (15 min).
+                runtime.needs_2fa_intervention = False
+                runtime.state = "authenticating"
+                try:
+                    await session.async_logout()
+                except Exception:
+                    pass
+                try:
+                    session = await _authenticate(username, password)
+                except Exception as auth_err:
+                    runtime.state = "error"
+                    runtime.last_error = f"Re-authentication failed: {auth_err}"
+                    runtime.reauth_failures += 1
+                    print(f"Error: re-authentication failed: {auth_err}", file=sys.stderr)
+                    await _wait_for_wakeup(stop_event, runtime.force_fetch, timeout=300)
+                    continue
+                runtime.reauth_failures = 0
+                try:
+                    await run_update(
+                        session, storage_path,
+                        runtime.config.ip6, runtime.config.secure_core,
+                        runtime.config.tor, runtime.config.free_tier,
+                        runtime.config.gluetun_json,
+                        status=runtime, broker=broker,
+                        force_fetch=True,
+                        stop_event=stop_event,
+                        tfa_timeout=900,  # 15 min — user is actively intervening
+                    )
+                except _TfaTimeoutError as tfa_err:
+                    runtime.state = "error"
+                    runtime.last_error = str(tfa_err)
+                    runtime.needs_2fa_intervention = True
+                    runtime.reauth_failures += 1
+                    print(f"2FA timeout: {tfa_err}", file=sys.stderr)
+                    await _wait_for_wakeup(stop_event, runtime.force_fetch, timeout=300)
+                    continue
+                except Exception as e:
+                    runtime.state = "error"
+                    runtime.last_error = str(e)
+                    print(f"\nError during update: {e}", file=sys.stderr)
+                    await _wait_for_wakeup(stop_event, runtime.force_fetch, timeout=300)
+                    continue
             # On the very first iteration, skip the update if the cached server
             # list is still fresh (< 12 h).  The user can trigger a fetch manually
             # via the "Fetch Now" button.  After the first sleep we always fetch.
-            if first_run and not force and (cached_result := _load_cached_api(storage_path)) is not None:
+            elif first_run and not force and (cached_result := _load_cached_api(storage_path)) is not None:
                 cache_ts = int(cached_result[1].stem.split(".", 1)[1])
                 age_min = int((time.time() - cache_ts) / 60)
                 print(
@@ -1549,9 +1730,9 @@ async def main():
                     runtime.last_run_time = float(cache_ts)
                 except Exception as _e:
                     print(f"Startup: could not populate stats from cache: {_e}", file=sys.stderr)
-                runtime.state = "sleeping"
                 first_run = False
             else:
+                _tfa_timeout = 900 if first_run else 300  # 15 min startup, 5 min re-auth
                 first_run = False
                 try:
                     await run_update(
@@ -1561,55 +1742,102 @@ async def main():
                         runtime.config.gluetun_json,
                         status=runtime, broker=broker,
                         force_fetch=force,
+                        stop_event=stop_event,
+                        tfa_timeout=_tfa_timeout,
                     )
+                except ProtonAPIAuthenticationNeeded:
+                    print(
+                        "\nSession expired (refresh token invalid). "
+                        "Re-authenticating...",
+                        file=sys.stderr,
+                    )
+                    runtime.state = "authenticating"
+                    # Best-effort logout of the expired session
+                    try:
+                        await session.async_logout()
+                    except Exception:
+                        pass
+                    try:
+                        session = await _authenticate(username, password)
+                    except Exception as auth_err:
+                        runtime.state = "error"
+                        runtime.last_error = f"Re-authentication failed: {auth_err}"
+                        runtime.reauth_failures += 1
+                        print(f"Error: re-authentication failed: {auth_err}", file=sys.stderr)
+                        print("Waiting 5 minutes before retry...", file=sys.stderr)
+                        await _wait_for_wakeup(stop_event, runtime.force_fetch, timeout=300)
+                        continue
+                    runtime.reauth_failures = 0
+                    print("Re-authentication successful. Retrying fetch...", file=sys.stderr)
+                    # Retry the fetch with re-auth 2FA timeout (5 min)
+                    try:
+                        await run_update(
+                            session, storage_path,
+                            runtime.config.ip6, runtime.config.secure_core,
+                            runtime.config.tor, runtime.config.free_tier,
+                            runtime.config.gluetun_json,
+                            status=runtime, broker=broker,
+                            force_fetch=True,
+                            stop_event=stop_event,
+                            tfa_timeout=300,  # 5 min — re-auth context, nobody's watching
+                        )
+                    except _TfaTimeoutError as tfa_err:
+                        runtime.state = "error"
+                        runtime.last_error = str(tfa_err)
+                        runtime.needs_2fa_intervention = True
+                        runtime.reauth_failures += 1
+                        print(f"2FA timeout during re-auth: {tfa_err}", file=sys.stderr)
+                        await _wait_for_wakeup(stop_event, runtime.force_fetch, timeout=300)
+                        continue
+                    except Exception as retry_err:
+                        runtime.state = "error"
+                        runtime.last_error = str(retry_err)
+                        print(f"\nError during retry: {retry_err}", file=sys.stderr)
+                        await _wait_for_wakeup(stop_event, runtime.force_fetch, timeout=300)
+                        continue
+                except _TfaTimeoutError as tfa_err:
+                    runtime.state = "error"
+                    runtime.last_error = str(tfa_err)
+                    runtime.needs_2fa_intervention = True
+                    runtime.reauth_failures += 1
+                    print(f"2FA timeout: {tfa_err}", file=sys.stderr)
+                    await _wait_for_wakeup(stop_event, runtime.force_fetch, timeout=300)
+                    continue
                 except Exception as e:
                     runtime.state = "error"
                     runtime.last_error = str(e)
                     print(f"\nError during update: {e}", file=sys.stderr)
-                    # Wait 5 minutes before retry, but still respond to stop signal
                     print("Waiting 5 minutes before retry...", file=sys.stderr)
-                    try:
-                        await asyncio.wait_for(stop_event.wait(), timeout=300)
-                    except asyncio.TimeoutError:
-                        pass
+                    await _wait_for_wakeup(stop_event, runtime.force_fetch, timeout=300)
                     continue
 
             if stop_event.is_set():
                 break
 
-            # Sleep until next scheduled fetch.  When the first run was skipped
-            # because the cache is still fresh, sleep only until the cache expires
-            # (plus a random jitter of 0–4 h) so the next fetch stays aligned.
-            cached_for_sleep = _load_cached_api(storage_path)
-            if cached_for_sleep is not None:
-                cache_ts = int(cached_for_sleep[1].stem.split(".", 1)[1])
-                cache_expires_in = _CACHE_MAX_AGE_SECONDS - (time.time() - cache_ts)
-                sleep_seconds = max(60, cache_expires_in) + random.uniform(0, 4 * 3600)
+            # --- Mode-aware post-fetch behavior ---
+            if runtime.config.auto_fetch == "off":
+                # Run-once mode: sit idle until user triggers "Fetch Now" or stop
+                runtime.state = "idle"
+                runtime.next_run_time = None
+                print("\nIdle — use 'Fetch Now' to update.", file=sys.stderr)
+                await _wait_for_wakeup(stop_event, runtime.force_fetch, timeout=None)
             else:
-                sleep_hours = random.uniform(12, 36)
-                sleep_seconds = sleep_hours * 3600
-            next_run_time = time.time() + sleep_seconds
-            next_run_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(next_run_time))
+                # Auto-fetch mode: sleep until next scheduled fetch
+                cached_for_sleep = _load_cached_api(storage_path)
+                if cached_for_sleep is not None:
+                    cache_ts = int(cached_for_sleep[1].stem.split(".", 1)[1])
+                    cache_expires_in = _CACHE_MAX_AGE_SECONDS - (time.time() - cache_ts)
+                    sleep_seconds = max(60, cache_expires_in) + random.uniform(0, 4 * 3600)
+                else:
+                    sleep_hours = random.uniform(12, 36)
+                    sleep_seconds = sleep_hours * 3600
+                next_run_time = time.time() + sleep_seconds
+                next_run_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(next_run_time))
 
-            runtime.state = "sleeping"
-            runtime.next_run_time = next_run_time
-            print(f"\nSleeping {sleep_seconds/3600:.2f} h. Next run at {next_run_str}", file=sys.stderr)
-            # Wake early on stop or force-refresh
-            while not stop_event.is_set() and not runtime.force_fetch.is_set():
-                try:
-                    remaining = runtime.next_run_time - time.time()
-                    if remaining <= 0:
-                        break
-                    await asyncio.wait_for(
-                        asyncio.shield(asyncio.gather(
-                            stop_event.wait(), runtime.force_fetch.wait(),
-                            return_exceptions=True,
-                        )),
-                        timeout=min(remaining, 30),
-                    )
-                    break
-                except asyncio.TimeoutError:
-                    pass  # keep looping to re-check remaining time
+                runtime.state = "sleeping"
+                runtime.next_run_time = next_run_time
+                print(f"\nSleeping {sleep_seconds/3600:.2f} h. Next run at {next_run_str}", file=sys.stderr)
+                await _wait_for_wakeup(stop_event, runtime.force_fetch, timeout=sleep_seconds)
     finally:
         runtime.state = "shutting_down"
         web_server.close()
