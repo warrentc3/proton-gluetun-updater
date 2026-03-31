@@ -871,7 +871,7 @@ async def _fetch_server_list(
                     f"({remaining/60:.0f} min remaining)...",
                     file=sys.stderr,
                 )
-                try:
+                if stop_event is not None:
                     # Race broker against stop_event so SIGTERM exits immediately
                     broker_task = asyncio.ensure_future(broker.wait_for_code())
                     stop_task = asyncio.ensure_future(stop_event.wait())
@@ -882,14 +882,23 @@ async def _fetch_server_list(
                     )
                     for t in pending:
                         t.cancel()
+                    if pending:
+                        await asyncio.gather(*pending, return_exceptions=True)
                     if stop_task in done:
                         raise _TfaTimeoutError("Shutdown requested during 2FA wait.")
                     if broker_task in done:
                         totp_code = broker_task.result()
                     else:
                         continue  # timeout — re-check deadline and stop_event
-                except asyncio.TimeoutError:
-                    continue  # re-check deadline and stop_event
+                else:
+                    # No stop_event: only wait for broker with a timeout
+                    try:
+                        totp_code = await asyncio.wait_for(
+                            broker.wait_for_code(),
+                            timeout=min(remaining, 30),
+                        )
+                    except asyncio.TimeoutError:
+                        continue  # re-check deadline
                 success = await session.async_validate_2fa_code(totp_code)
                 if success:
                     broker.message = ""  # Clear any previous error message
@@ -1494,17 +1503,21 @@ async def _wait_for_wakeup(
             wait_time = min(remaining, 30)
         else:
             wait_time = 30
-        try:
-            await asyncio.wait_for(
-                asyncio.shield(asyncio.gather(
-                    stop_event.wait(), force_fetch.wait(),
-                    return_exceptions=True,
-                )),
-                timeout=wait_time,
-            )
+        wait_tasks = [
+            asyncio.create_task(stop_event.wait()),
+            asyncio.create_task(force_fetch.wait()),
+        ]
+        done, pending = await asyncio.wait(
+            wait_tasks,
+            timeout=wait_time,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        if done:
             break
-        except asyncio.TimeoutError:
-            pass
 
 
 async def main():
