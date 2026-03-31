@@ -16,5 +16,8 @@ docker-compose.local.yml
 # Session state
 CONTEXT.md
 
+# Local analysis and review artifacts
+code-review/
+
 # Beads-generated agent instructions
 AGENTS.md
