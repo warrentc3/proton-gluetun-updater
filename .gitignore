@@ -6,3 +6,15 @@ __pycache__/
 servers.json
 servers-proton.json
 docker-compose.local.yml
+
+# Beads / Dolt files
+.beads
+.dolt/
+.beads-credential-key
+.beads-project
+
+# Session state
+CONTEXT.md
+
+# Beads-generated agent instructions
+AGENTS.md
