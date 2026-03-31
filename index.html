@@ -1,0 +1,469 @@
+<!DOCTYPE html><html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>ProtonVPN Gluetun Updater</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{background:#0f1117;color:#e2e8f0;font-family:system-ui,sans-serif;min-height:100vh;
+         display:flex;flex-direction:column;align-items:center;padding:2rem 1rem}
+    h1{font-size:1.4rem;font-weight:700;margin-bottom:.2rem}
+    .sub{font-size:.8rem;color:#64748b;margin-bottom:1.5rem;text-align:center}
+    .card{background:#1e2130;border:1px solid #2d3348;border-radius:10px;
+          padding:1.5rem;width:100%;max-width:540px;margin-bottom:1rem}
+    .badge{display:inline-block;padding:.2rem .75rem;border-radius:999px;font-size:.72rem;
+           font-weight:700;text-transform:uppercase;letter-spacing:.06em;margin-bottom:1.2rem}
+    .s-starting,.s-shutting_down{background:#1e293b;color:#94a3b8}
+    .s-authenticating{background:#1e293b;color:#93c5fd;animation:pulse 1.2s ease-in-out infinite}
+    .s-running{background:#14532d;color:#86efac;animation:pulse 1.2s ease-in-out infinite}
+    .s-sleeping{background:#1e3a5f;color:#7dd3fc}
+    .s-idle{background:#1e293b;color:#94a3b8}
+    .s-waiting_tfa{background:#451a03;color:#fdba74;animation:pulse 1s ease-in-out infinite}
+    .s-error{background:#450a0a;color:#fca5a5}
+    @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:.8rem 2rem}
+    .stat label{display:block;font-size:.68rem;color:#64748b;text-transform:uppercase;
+                letter-spacing:.08em;margin-bottom:.2rem}
+    .stat .val{font-size:.88rem;font-family:monospace;color:#e2e8f0}
+    .err{margin-top:1rem;background:#1c0a0a;border:1px solid #7f1d1d;border-radius:6px;
+         padding:.75rem;font-size:.78rem;color:#fca5a5;font-family:monospace;word-break:break-all}
+    .cfg-banner{background:#7f1d1d;border:2px solid #ef4444;color:#fecaca;padding:1rem 1.5rem;
+                font-size:.95rem;font-weight:700;border-radius:8px;margin-bottom:1.2rem;
+                text-align:center;line-height:1.6;letter-spacing:.01em}
+    body.light .cfg-banner{background:#fef2f2;border-color:#dc2626;color:#7f1d1d}
+    .tfa{background:#1e2130;border:1px solid #2d3348;border-radius:10px;
+         padding:1.5rem;width:100%;max-width:540px;margin-bottom:1rem}
+    .tfa.active{border-color:#92400e}
+    .tfa h2{font-size:1rem;color:#94a3b8;margin-bottom:.4rem}
+    .tfa.active h2{color:#fdba74}
+    .tfa-badge{display:inline-block;padding:.2rem .75rem;border-radius:999px;font-size:.72rem;
+                font-weight:700;text-transform:uppercase;letter-spacing:.06em;margin-bottom:.8rem}
+    .tfa-inactive{background:#1e293b;color:#64748b}
+    .tfa-not-required{background:#1e293b;color:#7dd3fc}
+    .tfa-verified{background:#14532d;color:#86efac}
+    .tfa-waiting{background:#451a03;color:#fdba74;animation:pulse 1s ease-in-out infinite}
+    .tfa-accepted{background:#14532d;color:#86efac}
+    .tfa p{font-size:.8rem;color:#64748b;margin-bottom:.8rem}
+    .tfa.active p{color:#94a3b8}
+    .tfa-msg{font-size:.78rem;color:#fca5a5;margin-bottom:.6rem}
+    .tfa-form{display:flex;gap:.5rem}
+    .tfa-in{flex:1;background:#0f1117;border:1px solid #2d3348;border-radius:6px;
+            padding:.5rem .75rem;color:#64748b;font-size:1.1rem;letter-spacing:.2em;
+            text-align:center;font-family:monospace;outline:none;cursor:not-allowed}
+    .tfa.active .tfa-in{border-color:#475569;color:#e2e8f0;cursor:text}
+    .tfa.active .tfa-in:focus{border-color:#f97316}
+    .tfa-btn{background:#334155;color:#64748b;border:none;border-radius:6px;
+             padding:.5rem 1.2rem;font-size:.9rem;font-weight:600;cursor:not-allowed}
+    .tfa.active .tfa-btn{background:#f97316;color:#fff;cursor:pointer}
+    .tfa.active .tfa-btn:hover{background:#ea580c}
+    .stats-tbl{width:100%;border-collapse:collapse;font-size:.8rem;margin-top:.2rem}
+    .stats-tbl th{text-align:left;color:#64748b;font-weight:600;font-size:.68rem;
+                  text-transform:uppercase;letter-spacing:.08em;padding:.3rem .5rem;
+                  border-bottom:1px solid #2d3348}
+    .stats-tbl th:not(:first-child),.stats-tbl td:not(:first-child){text-align:right}
+    .stats-tbl td{padding:.3rem .5rem;font-family:monospace;color:#e2e8f0;
+                  border-bottom:1px solid #1a1f2e}
+    .stats-tbl tr:last-child td{border-bottom:none}
+    .stats-tbl .match{color:#86efac}
+    .stats-tbl .diff{color:#fca5a5}
+    .stats-notes{margin-top:.6rem;font-size:.72rem;color:#64748b}
+    .section-heading{font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:#64748b;margin-bottom:.8rem}
+    details.card>summary{list-style:none;cursor:pointer;user-select:none;margin-bottom:0}
+    details.card>summary::-webkit-details-marker{display:none}
+    details.card>summary::marker{content:''}
+    details.card>summary::after{content:'\25b8';font-size:.75rem;float:right;color:#64748b;line-height:1.4}
+    details.card[open]>summary{margin-bottom:.8rem}
+    details.card[open]>summary::after{content:'\25be'}
+    .filter-grid{display:grid;grid-template-columns:1fr 1fr;gap:.6rem 1.5rem;margin-top:.2rem}
+    .filter-item label{display:block;font-size:.68rem;color:#64748b;text-transform:uppercase;letter-spacing:.08em;margin-bottom:.15rem}
+    .filter-item .fval{font-size:.8rem;font-family:monospace;color:#e2e8f0}
+    .filter-item select{width:100%;background:#0f1117;border:1px solid #2d3348;border-radius:5px;
+      color:#e2e8f0;font-size:.8rem;font-family:monospace;padding:.3rem .5rem;cursor:pointer;outline:none}
+    .filter-item select:focus{border-color:#475569}
+    .cfg-apply{margin-top:1rem;display:flex;gap:.6rem;align-items:center}
+    .cfg-apply-btn{background:#334155;color:#94a3b8;border:none;border-radius:6px;
+      padding:.45rem 1.1rem;font-size:.82rem;font-weight:600;cursor:pointer;transition:background .15s,color .15s}
+    .cfg-apply-btn:hover{background:#475569;color:#e2e8f0}
+    .cfg-apply-btn:active{background:#1e293b}
+    .refresh-btn{background:#1e3a5f;color:#7dd3fc;border:none;border-radius:6px;
+      padding:.45rem 1.1rem;font-size:.82rem;font-weight:600;cursor:pointer;transition:background .15s,color .15s}
+    .refresh-btn:hover{background:#1e4976;color:#bae6fd}
+    .refresh-btn:active{background:#0f2744}
+    .refresh-btn:disabled{opacity:.5;cursor:not-allowed}
+    .reprocess-btn{background:#14532d;color:#86efac;border:none;border-radius:6px;
+      padding:.45rem 1.1rem;font-size:.82rem;font-weight:600;cursor:pointer;transition:background .15s,color .15s}
+    .reprocess-btn:hover{background:#166534;color:#bbf7d0}
+    .reprocess-btn:active{background:#052e16}
+    .reprocess-btn:disabled{opacity:.5;cursor:not-allowed}
+    .cfg-msg{font-size:.76rem;font-family:monospace}
+    .cfg-msg.ok{color:#86efac}.cfg-msg.err{color:#fca5a5}
+    .af-row{display:flex;align-items:flex-end;gap:.8rem;margin-top:.2rem}
+    .af-desc{font-size:.78rem;color:#64748b;margin-bottom:.8rem;line-height:1.5}
+    body.light .filter-item select{background:#f8fafc;border-color:#cbd5e1;color:#1e293b}
+    body.light .cfg-apply-btn{background:#e2e8f0;color:#475569}
+    body.light .cfg-apply-btn:hover{background:#cbd5e1;color:#1e293b}
+    body.light .reprocess-btn{background:#dcfce7;color:#166534}
+    body.light .reprocess-btn:hover{background:#bbf7d0;color:#14532d}
+    body.light .refresh-btn{background:#dbeafe;color:#1e40af}
+    body.light .refresh-btn:hover{background:#bfdbfe;color:#1e3a8a}
+    .reauth-msg{font-size:.82rem;font-weight:700;color:#ef4444;margin-top:.6rem}
+    body.light .reauth-msg{color:#dc2626}
+    footer{font-size:.7rem;color:#334155;margin-top:1.5rem}
+    #theme-btn{position:fixed;top:.9rem;right:1rem;background:transparent;border:1px solid #2d3348;
+      border-radius:6px;color:#64748b;font-size:1.05rem;cursor:pointer;padding:.28rem .6rem;
+      z-index:100;line-height:1;transition:border-color .15s,color .15s;user-select:none}
+    #theme-btn:hover{border-color:#475569;color:#94a3b8}
+    body.light{background:#f0f4f8;color:#1e293b}
+    body.light .sub{color:#475569}
+    body.light .card{background:#fff;border-color:#cbd5e1}
+    body.light .stat label{color:#475569}
+    body.light .stat .val{color:#1e293b}
+    body.light .err{background:#fef2f2;border-color:#fca5a5}
+    body.light .tfa{background:#fff;border-color:#cbd5e1}
+    body.light .tfa h2{color:#475569}
+    body.light .tfa p{color:#475569}
+    body.light .tfa-inactive{color:#475569}
+    body.light .tfa-not-required{background:#dbeafe;color:#1e40af}
+    body.light .tfa-verified{background:#dcfce7;color:#166534}
+    body.light .tfa-waiting{color:#fdba74}
+    body.light .tfa-in{background:#f8fafc;border-color:#cbd5e1;color:#475569}
+    body.light .tfa.active .tfa-in{border-color:#94a3b8;color:#1e293b}
+    body.light .tfa-btn{background:#e2e8f0;color:#475569}
+    body.light .stats-tbl th{color:#475569;border-bottom-color:#cbd5e1}
+    body.light .stats-tbl td{color:#1e293b;border-bottom-color:#e2e8f0}
+    body.light .stats-notes{color:#475569}
+    body.light .section-heading{color:#475569}
+    body.light details.card>summary::after{color:#475569}
+    body.light .filter-item label{color:#475569}
+    body.light .filter-item .fval{color:#1e293b}
+    body.light #theme-btn{border-color:#cbd5e1;color:#475569}
+    body.light #theme-btn:hover{border-color:#94a3b8;color:#1e293b}
+    body.light footer{color:#94a3b8}
+    body.light .af-desc{color:#475569}
+  </style>
+</head>
+<body>
+  <button id="theme-btn" title="Switch to light mode" aria-label="Toggle theme">&#x2600;&#xFE0F;</button>
+  <div id="cfg_banner" class="cfg-banner" style="display:none" role="alert"></div>
+  <h1>ProtonVPN Gluetun Updater</h1>
+  <p class="sub">Automatic ProtonVPN server list updater for Gluetun</p>
+  <div class="card" id="status_card">
+    <div class="grid" id="status_grid">
+      <div id="status_badge" class="badge s-starting">starting</div>
+      <div class="stat"><label>Uptime</label><span class="val" id="uptime">&#x2014;</span></div>
+      <div class="stat"><label>Last Fetch</label><span class="val" id="last_run">&#x2014;</span></div>
+      <div class="stat"><label>Next Run</label><span class="val" id="next_run">&#x2014;</span></div>
+    </div>
+    <div style="margin-top:.8rem;display:flex;align-items:center;gap:.6rem">
+      <button class="refresh-btn" type="button" id="refresh_btn">&#x21bb; Fetch Now</button>
+      <span id="fetch_msg" class="cfg-msg" style="display:none"></span>
+    </div>
+    <div id="reauth_msg" class="reauth-msg" style="display:none">Session expired &mdash; click Fetch Now to re-authenticate.</div>
+    <div id="err" class="err" style="display:none"></div>
+  </div>
+  <div class="tfa" id="tfa_card">
+    <h2>&#x1F511; 2FA</h2>
+    <div id="tfa_badge" class="tfa-badge tfa-inactive">inactive</div>
+    <p id="tfa_desc">Not currently required</p>
+    <div id="tfa_msg" class="tfa-msg" style="display:none"></div>
+    <form class="tfa-form" method="POST" action="/2fa" id="tfa_form">
+      <input class="tfa-in" type="text" name="code" maxlength="8" inputmode="numeric"
+             pattern="[0-9 ]*" placeholder="000000" autocomplete="one-time-code" id="tfa_input" disabled>
+      <button class="tfa-btn" type="submit" id="tfa_btn" disabled>Submit</button>
+    </form>
+  </div>
+  <div class="card" id="auto_fetch_card">
+    <div class="section-heading">Fetch Mode</div>
+    <p class="af-desc">
+      <strong>off</strong> &mdash; run once on startup, fetch manually via Fetch Now.<br>
+      <strong>on</strong> &mdash; recurring scheduled fetch with session keep-alive.
+    </p>
+    <form id="auto_fetch_form">
+      <div class="af-row">
+        <div class="filter-item" style="flex:0 0 auto;min-width:6rem">
+          <label for="sel_auto_fetch">Schedule</label>
+          <select id="sel_auto_fetch" name="auto_fetch">
+            <option value="off">off</option>
+            <option value="on">on</option>
+          </select>
+        </div>
+        <button class="cfg-apply-btn" type="submit">Apply</button>
+        <span id="af_msg" class="cfg-msg" style="display:none"></span>
+      </div>
+    </form>
+  </div>
+  <details class="card" id="filter_card">
+    <summary id="filter_heading" class="section-heading">Filter Configuration</summary>
+    <form id="cfg_form">
+    <div class="filter-grid" id="filter_grid">
+      <div class="filter-item" id="fi_ip6"><label for="sel_ip6">IP6</label>
+        <select id="sel_ip6" name="ip6"><option>include</option><option>exclude</option><option>only</option></select></div>
+      <div class="filter-item" id="fi_secure_core"><label for="sel_secure_core">Secure Core</label>
+        <select id="sel_secure_core" name="secure_core"><option>include</option><option>exclude</option><option>only</option></select></div>
+      <div class="filter-item" id="fi_tor"><label for="sel_tor">TOR</label>
+        <select id="sel_tor" name="tor"><option>include</option><option>exclude</option><option>only</option></select></div>
+      <div class="filter-item" id="fi_free_tier"><label for="sel_free_tier">Free Tier</label>
+        <select id="sel_free_tier" name="free_tier"><option>include</option><option>exclude</option><option>only</option></select></div>
+      <div class="filter-item" id="fi_gluetun_json"><label for="sel_gluetun_json">Gluetun JSON</label>
+        <select id="sel_gluetun_json" name="gluetun_json"><option>none</option><option>replace</option><option>update</option></select></div>
+    </div>
+    <div class="cfg-apply">
+      <button class="cfg-apply-btn" type="submit">Apply</button>
+      <button class="reprocess-btn" type="button" id="reprocess_btn">&#x21bb; Reprocess</button>
+      <span id="cfg_msg" class="cfg-msg" style="display:none"></span>
+    </div>
+    </form>
+  </details>
+  <details class="card" id="stats_card" style="display:none">
+    <summary id="stats_heading" class="section-heading">Last Run Statistics<span id="server_count" style="font-weight:normal;font-size:.85em;margin-left:.75em;opacity:.75"></span></summary>
+    <table class="stats-tbl">
+      <thead><tr><th>Category</th><th>Total</th><th>In Output</th></tr></thead>
+      <tbody id="stats_body"></tbody>
+    </table>
+    <div id="stats_notes" class="stats-notes"></div>
+  </details>
+  <footer>Auto-refreshes every 10 s &mdash; last: <span id="ts">never</span></footer>
+  <script>
+    function set(id,v){var e=document.getElementById(id);if(e)e.textContent=v!=null?v:'\u2014';}
+    var _configLoaded=false;
+    async function refresh(){
+      try{
+        var r=await fetch('/status');if(!r.ok)return;
+        var d=await r.json();
+        var b=document.getElementById('status_badge');
+        var state=d.state;
+        var displayState=state;
+        if(state==='waiting_tfa')displayState='waiting for 2FA';
+        b.textContent=displayState.replace(/_/g,' ');
+        b.className='badge s-'+state;
+        set('uptime',d.uptime);
+        var nowSec=Date.now()/1000;
+        if(d.last_run_time!=null){
+          var lsecs=Math.max(0,Math.round(nowSec-d.last_run_time));
+          var lh=Math.floor(lsecs/3600),lm=Math.floor((lsecs%3600)/60);
+          var lastRunText;
+          if(lsecs<5){lastRunText='just now';}
+          else if(lsecs<60){lastRunText=lsecs+'s ago';}
+          else{lastRunText=(lh>0?lh+'h '+lm+'m':lm+'m')+' ago';}
+          set('last_run',lastRunText);
+        }else{set('last_run',null);}
+        if(d.next_run_time!=null){
+          var secs=Math.max(0,Math.round(d.next_run_time-nowSec));
+          var h=Math.floor(secs/3600),m=Math.floor((secs%3600)/60);
+          var nextRunText;
+          if(secs<60){nextRunText='in '+secs+'s';}
+          else{nextRunText=h>0?h+'h '+m+'m':m+'m';}
+          set('next_run',nextRunText);
+        }else{set('next_run',null);}
+        var cb=document.getElementById('cfg_banner');
+        if(d.configuration_error){cb.style.display='block';cb.textContent=d.last_error||'Missing credentials \u2014 restart the container after setting PROTON_USERNAME and PROTON_PASSWORD.';}
+        else{cb.style.display='none';}
+        var eb=document.getElementById('err');
+        if(d.last_error&&!d.configuration_error){eb.style.display='block';eb.textContent=d.last_error;}
+        else{eb.style.display='none';}
+        var sc=document.getElementById('stats_card');
+        var sb=document.getElementById('stats_body');
+        var sn=document.getElementById('stats_notes');
+        if(d.stats&&d.stats.rows&&d.stats.rows.length){
+          sc.style.display='block';
+          while(sb.firstChild)sb.removeChild(sb.firstChild);
+          var scSpan=document.getElementById('server_count');
+          if(scSpan)scSpan.textContent=d.server_count!=null?'\u2014 '+d.server_count.toLocaleString()+' servers':'';
+          d.stats.rows.forEach(function(row){
+            var cls=row.total===row.out?'match':'diff';
+            var tr=document.createElement('tr');
+            var tdLabel=document.createElement('td');tdLabel.textContent=row.label;
+            var tdTotal=document.createElement('td');tdTotal.textContent=row.total.toLocaleString();
+            var tdOut=document.createElement('td');tdOut.className=cls;tdOut.textContent=row.out.toLocaleString();
+            tr.appendChild(tdLabel);tr.appendChild(tdTotal);tr.appendChild(tdOut);
+            sb.appendChild(tr);
+          });
+          var notes=[];
+          if(d.stats.skipped_disabled)notes.push(d.stats.skipped_disabled.toLocaleString()+' physical records skipped (disabled)');
+          if(d.stats.skipped_duplicate)notes.push(d.stats.skipped_duplicate.toLocaleString()+' physical records skipped (duplicate IP)');
+          sn.textContent=notes.join(' \u00b7 ');
+        }else{sc.style.display='none';}
+        var tc=document.getElementById('tfa_card');
+        var ti=document.getElementById('tfa_input');
+        var tb=document.getElementById('tfa_btn');
+        var td=document.getElementById('tfa_desc');
+        var tfab=document.getElementById('tfa_badge');
+        if(d.tfa_waiting){
+          tc.classList.add('active');
+          ti.disabled=false;tb.disabled=false;
+          tfab.textContent='waiting';
+          tfab.className='tfa-badge tfa-waiting';
+          td.textContent='Enter your 6- to 8-digit authenticator code to continue.';
+          ti.focus();
+        }else{
+          tc.classList.remove('active');
+          ti.disabled=true;tb.disabled=true;ti.value='';
+          if(d.tfa_required===false){
+            tfab.textContent='not required';
+            tfab.className='tfa-badge tfa-not-required';
+            td.textContent='Authentication succeeded without 2FA.';
+          }else if(d.tfa_required===true){
+            tfab.textContent='verified';
+            tfab.className='tfa-badge tfa-verified';
+            td.textContent='2FA authentication complete.';
+          }else{
+            tfab.textContent='inactive';
+            tfab.className='tfa-badge tfa-inactive';
+            td.textContent='Not currently required';
+          }
+        }
+        var tm=document.getElementById('tfa_msg');
+        if(d.tfa_message){tm.style.display='block';tm.textContent=d.tfa_message;}
+        else{tm.style.display='none';}
+        if(d.config&&!_configLoaded){
+          _configLoaded=true;
+          var selMap={ip6:'sel_ip6',secure_core:'sel_secure_core',tor:'sel_tor',free_tier:'sel_free_tier',gluetun_json:'sel_gluetun_json'};
+          Object.keys(selMap).forEach(function(k){
+            var el=document.getElementById(selMap[k]);
+            if(el&&d.config[k]!=null)el.value=d.config[k];
+          });
+          var afEl=document.getElementById('sel_auto_fetch');
+          if(afEl&&d.config.auto_fetch!=null)afEl.value=d.config.auto_fetch;
+        }
+        var rm=document.getElementById('reauth_msg');
+        if(rm){rm.style.display=d.needs_2fa_intervention?'block':'none';}
+        set('ts',new Date().toLocaleTimeString());
+      }catch(e){}
+    }
+    (function(){
+      var btn=document.getElementById('theme-btn');
+      function applyTheme(t){
+        if(t==='light'){
+          document.body.classList.add('light');
+          btn.textContent='\uD83C\uDF19';btn.title='Switch to dark mode';
+        }else{
+          document.body.classList.remove('light');
+          btn.textContent='\u2600\uFE0F';btn.title='Switch to light mode';
+        }
+      }
+      applyTheme(localStorage.getItem('theme')||'dark');
+      btn.addEventListener('click',function(){
+        var next=document.body.classList.contains('light')?'dark':'light';
+        localStorage.setItem('theme',next);applyTheme(next);
+      });
+    })();
+    refresh();setInterval(refresh,10000);
+    document.getElementById('auto_fetch_form').addEventListener('submit',async function(e){
+      e.preventDefault();
+      var msg=document.getElementById('af_msg');
+      var btn=this.querySelector('button[type="submit"]');
+      btn.disabled=true;
+      var fd=new FormData(e.target);
+      var body=new URLSearchParams(fd).toString();
+      try{
+        var r=await fetch('/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body});
+        msg.style.display='inline';
+        if(r.ok){
+          msg.textContent='\u2713 Saved';msg.className='cfg-msg ok';
+        }else{
+          var t=await r.text();
+          msg.textContent='\u2717 '+t;msg.className='cfg-msg err';
+        }
+      }catch(err){
+        msg.style.display='inline';msg.textContent='\u2717 Network error';msg.className='cfg-msg err';
+      }
+      btn.disabled=false;
+      setTimeout(function(){msg.style.display='none';},3000);
+    });
+    document.getElementById('cfg_form').addEventListener('submit',async function(e){
+      e.preventDefault();
+      var msg=document.getElementById('cfg_msg');
+      var btn=this.querySelector('.cfg-apply-btn');
+      btn.disabled=true;
+      var fd=new FormData(e.target);
+      var body=new URLSearchParams(fd).toString();
+      try{
+        var r=await fetch('/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body});
+        msg.style.display='inline';
+        if(r.ok){
+          msg.textContent='\u2713 Saved';msg.className='cfg-msg ok';
+        }else{
+          var t=await r.text();
+          msg.textContent='\u2717 '+t;msg.className='cfg-msg err';
+        }
+      }catch(err){
+        msg.style.display='inline';msg.textContent='\u2717 Network error';msg.className='cfg-msg err';
+      }
+      btn.disabled=false;
+      setTimeout(function(){msg.style.display='none';},3000);
+    });
+    document.getElementById('reprocess_btn').addEventListener('click',async function(){
+      var btn=this;
+      var msg=document.getElementById('cfg_msg');
+      btn.disabled=true;
+      try{
+        var r=await fetch('/reprocess',{method:'POST'});
+        msg.style.display='inline';
+        if(r.ok){
+          msg.textContent='\u2713 Reprocessed';msg.className='cfg-msg ok';
+          setTimeout(refresh,1000);
+        }else{
+          var t=await r.text();
+          msg.textContent='\u2717 '+t;msg.className='cfg-msg err';
+        }
+      }catch(err){
+        msg.style.display='inline';msg.textContent='\u2717 Network error';msg.className='cfg-msg err';
+      }
+      btn.disabled=false;
+      setTimeout(function(){msg.style.display='none';},4000);
+    });
+    document.getElementById('refresh_btn').addEventListener('click',async function(){
+      var btn=this;
+      var msg=document.getElementById('fetch_msg');
+      btn.disabled=true;
+      try{
+        var r=await fetch('/refresh',{method:'POST'});
+        msg.style.display='inline';
+        if(r.ok){
+          msg.textContent='\u21bb Fetching\u2026';msg.className='cfg-msg ok';
+          setTimeout(refresh,2000);
+        }else{
+          var t=await r.text();
+          msg.textContent='\u2717 '+t;msg.className='cfg-msg err';
+          btn.disabled=false;
+        }
+      }catch(err){
+        msg.style.display='inline';msg.textContent='\u2717 Network error';msg.className='cfg-msg err';
+        btn.disabled=false;
+      }
+      setTimeout(function(){msg.style.display='none';btn.disabled=false;},5000);
+    });
+    document.getElementById('tfa_form').addEventListener('submit',async function(e){
+      e.preventDefault();
+      var ti=document.getElementById('tfa_input');
+      var tb=document.getElementById('tfa_btn');
+      var tfab=document.getElementById('tfa_badge');
+      var td=document.getElementById('tfa_desc');
+      var tm=document.getElementById('tfa_msg');
+      var tc=document.getElementById('tfa_card');
+      tb.disabled=true;
+      try{
+        var r=await fetch('/2fa',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},
+          body:'code='+encodeURIComponent(ti.value.trim())});
+        if(r.ok){
+          tc.classList.remove('active');
+          ti.disabled=true;ti.value='';
+          tfab.textContent='accepted';
+          tfab.className='tfa-badge tfa-accepted';
+          td.textContent='Code accepted \u2014 authenticating\u2026';
+          tm.style.display='none';
+          setTimeout(refresh,5000);
+        }else{
+          var msg=await r.text();
+          tm.style.display='block';
+          tm.textContent=msg||'Submission failed \u2014 please try again.';
+          tb.disabled=false;
+        }
+      }catch(err){
+        tm.style.display='block';
+        tm.textContent='Network error \u2014 please try again.';
+        tb.disabled=false;
+      }
+    });
+  </script>
+</body></html>
