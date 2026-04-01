@@ -74,6 +74,7 @@ jobs:
           sbom: false
 
       - name: Scan image for vulnerabilities
+        if: ${{ github.event_name != 'pull_request' }}
         uses: aquasecurity/trivy-action@v0.35.0
         with:
           image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
@@ -82,12 +83,13 @@ jobs:
           severity: CRITICAL,HIGH
 
       - name: Upload Trivy results to GitHub Security
+        if: ${{ github.event_name != 'pull_request' }}
         uses: github/codeql-action/upload-sarif@v3
-        if: always()
         with:
           sarif_file: trivy-results.sarif
 
       - name: Fail on critical vulnerabilities
+        if: ${{ github.event_name != 'pull_request' }}
         uses: aquasecurity/trivy-action@v0.35.0
         with:
           image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
