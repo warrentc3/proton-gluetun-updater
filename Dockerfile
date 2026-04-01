@@ -14,4 +14,7 @@ COPY countries.json index.html transform.py storage.py state.py protonvpn.py web
 # Default environment variables
 ENV IP6=exclude
 
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+  CMD python -c "import os,urllib.request; urllib.request.urlopen(f'http://localhost:{os.environ.get(\"WEB_PORT\",\"8080\")}/health')"
+
 ENTRYPOINT ["python", "protonvpn_gluetun_updater.py"]

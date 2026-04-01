@@ -86,7 +86,15 @@ async def _web_handler(
             return
         method, path, _, body = req
 
-        if method == "GET" and path in ("/", ""):
+        if method == "GET" and path == "/health":
+            if runtime.configuration_error or runtime.tfa.needs_intervention:
+                _http_respond(writer, "503 Service Unavailable", "application/json",
+                              json.dumps({"healthy": False, "configuration_error": runtime.configuration_error,
+                                          "needs_tfa_intervention": runtime.tfa.needs_intervention}))
+            else:
+                _http_respond(writer, "200 OK", "application/json", '{"healthy":true}')
+
+        elif method == "GET" and path in ("/", ""):
             _http_respond(writer, "200 OK", "text/html; charset=utf-8", _HTML_PAGE)
 
         elif method == "GET" and path == "/status":
