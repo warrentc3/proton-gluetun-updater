@@ -1,6 +1,7 @@
 FROM python:3.13.12-slim
 
 RUN apt-get update && \
+    apt-get upgrade -y && \
     apt-get install -y --no-install-recommends git gnupg && \
     rm -rf /var/lib/apt/lists/*
 
