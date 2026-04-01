@@ -17,6 +17,7 @@ Environment variables:
     GLUETUN_SERVERS_JSON  How to update Gluetun's servers.json: none (default, don't touch it), replace (overwrite entirely with ProtonVPN-only content), or update (merge ProtonVPN servers into existing file, preserving all other providers)
     WEB_HOST          Web dashboard bind address (default: 127.0.0.1 for localhost-only; use 0.0.0.0 to expose publicly)
     WEB_PORT          Web dashboard port (default: 8080)
+    DEFER_AUTH        Skip authentication on startup — go straight to idle with the dashboard serving. Auth happens on first manual Fetch Now. Useful for testing Dockerfile changes, dependency updates, or dashboard tweaks without hitting the Proton API. Set to 1/true/yes to enable. (default: off)
 """
 import asyncio
 import dataclasses
@@ -789,8 +790,7 @@ async def _authenticate(username: str, password: str) -> Session:
     print("Authenticating...", file=sys.stderr)
     success = await session.async_authenticate(username, password)
     if not success:
-        print("Error: authentication failed.", file=sys.stderr)
-        sys.exit(1)
+        raise ProtonAPIAuthenticationNeeded("Authentication failed — check credentials.")
     return session
 
 
@@ -1597,6 +1597,8 @@ async def main():
         print(f"Warning: Invalid WEB_PORT value '{web_port_env}'. Using 8080.", file=sys.stderr)
         web_port = 8080
 
+    defer_auth = os.environ.get("DEFER_AUTH", "").lower() in ("1", "true", "yes")
+
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
@@ -1617,33 +1619,81 @@ async def main():
     web_server = await _start_web_server(web_host, web_port, runtime, broker)
 
     # Check credentials now that the web server is up so errors are visible on the dashboard
-    _missing = []
-    if not username:
-        _missing.append("PROTON_USERNAME (env var or Docker secret: proton_username)")
-    if not password:
-        _missing.append("PROTON_PASSWORD (env var or Docker secret: proton_password)")
-    if _missing:
-        msg = (
-            "\u26a0 Missing required credentials: " + ", ".join(_missing) + ". "
-            "Restart the container after setting these environment variables or Docker secrets."
-        )
-        print(f"Error: {msg}", file=sys.stderr)
-        runtime.state = "error"
-        runtime.last_error = msg
-        runtime.configuration_error = True
-        await stop_event.wait()
-        runtime.state = "shutting_down"
-        web_server.close()
-        await web_server.wait_closed()
-        return
+    if not defer_auth:
+        _missing = []
+        if not username:
+            _missing.append("PROTON_USERNAME (env var or Docker secret: proton_username)")
+        if not password:
+            _missing.append("PROTON_PASSWORD (env var or Docker secret: proton_password)")
+        if _missing:
+            msg = (
+                "\u26a0 Missing required credentials: " + ", ".join(_missing) + ". "
+                "Restart the container after setting these environment variables or Docker secrets."
+            )
+            print(f"Error: {msg}", file=sys.stderr)
+            runtime.state = "error"
+            runtime.last_error = msg
+            runtime.configuration_error = True
+            await stop_event.wait()
+            runtime.state = "shutting_down"
+            web_server.close()
+            await web_server.wait_closed()
+            return
 
-    runtime.state = "authenticating"
-    session = await _authenticate(username, password)
+    if defer_auth:
+        session = None
+        runtime.state = "idle"
+        runtime.next_run_time = None
+        print("DEFER_AUTH: skipping startup authentication — use Fetch Now to connect.", file=sys.stderr)
+    else:
+        runtime.state = "authenticating"
+        try:
+            session = await _authenticate(username, password)
+        except Exception as auth_err:
+            runtime.state = "error"
+            runtime.last_error = f"Authentication failed: {auth_err}"
+            runtime.configuration_error = True
+            await stop_event.wait()
+            runtime.state = "shutting_down"
+            web_server.close()
+            await web_server.wait_closed()
+            return
     first_run = True
     try:
         while not stop_event.is_set():
             force = runtime.force_fetch.is_set()
             runtime.force_fetch.clear()
+
+            # Deferred auth: authenticate on first manual trigger
+            if force and session is None:
+                if not username or not password:
+                    runtime.state = "error"
+                    runtime.last_error = (
+                        "Missing credentials \u2014 set PROTON_USERNAME and "
+                        "PROTON_PASSWORD, then restart."
+                    )
+                    runtime.configuration_error = True
+                    continue
+                runtime.state = "authenticating"
+                try:
+                    session = await _authenticate(username, password)
+                except Exception as auth_err:
+                    runtime.state = "error"
+                    runtime.last_error = f"Authentication failed: {auth_err}"
+                    runtime.reauth_failures += 1
+                    print(f"Error: deferred authentication failed: {auth_err}", file=sys.stderr)
+                    await _wait_for_wakeup(stop_event, runtime.force_fetch, timeout=300)
+                    continue
+                runtime.reauth_failures = 0
+                print("Deferred authentication successful.", file=sys.stderr)
+                # Fall through to normal force-fetch handling
+
+            # Still waiting for first Fetch Now (deferred auth not yet triggered)
+            if session is None:
+                runtime.state = "idle"
+                runtime.next_run_time = None
+                await _wait_for_wakeup(stop_event, runtime.force_fetch, timeout=None)
+                continue
 
             # When 2FA intervention is needed and this is an auto-fetch cycle
             # (not a manual "Fetch Now"), skip the fetch entirely — don't
@@ -1842,10 +1892,11 @@ async def main():
         runtime.state = "shutting_down"
         web_server.close()
         await web_server.wait_closed()
-        try:
-            await session.async_logout()
-        except Exception:
-            pass  # best-effort cleanup
+        if session is not None:
+            try:
+                await session.async_logout()
+            except Exception:
+                pass  # best-effort cleanup
 
     print("\nShutdown signal received, exiting...", file=sys.stderr)
 
