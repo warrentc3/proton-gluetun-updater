@@ -50,9 +50,25 @@ Output files (servers-proton.json, config.yaml) write to `c:/git/appdata/gluetun
 - Environment variables for all configuration (no CLI args)
 - Docker secrets as credential fallback
 
+## Architecture Principle
+
+**All future decisions, architecture, plumbing, and refactoring must be in the spirit of modularization.**
+
+The project is structured as distinct modules with clean boundaries:
+- `transform.py` — pure core, zero project imports, fully unit-testable
+- `storage.py` — persistence: `_Config` (YAML shape), cache, config load/save
+- `state.py` — process overseer: `_Status` (cross-cutting runtime state), `_TfaState`
+- `protonvpn.py` — ProtonVPN integration: auth, fetch, TFA flow. Standalone importable. Named `protonvpn.py` (not `proton.py`) to avoid shadowing the `proton-core` library's `proton` namespace package.
+- `web.py` — HTTP dashboard and control API
+- `protonvpn_gluetun_updater.py` — orchestration entry point only
+
+Every new feature goes into the correct module. The entry point never grows beyond orchestration.
+`proton.py` is designed as a reference implementation and standalone building block — the companion
+container and future community tooling will import it directly.
+
 ## History
 
-This project originated as a fork of Neonox31's work, then Warren's first solo project — built entirely with GitHub Copilot before switching to Claude. Code conventions, patterns, and structure reflect that era. Don't treat current state as the standard to follow — evolve it toward Warren's current standards as work naturally touches each area.
+This project originated as a fork of Neonox31's work, then Warren's first solo project — built entirely with GitHub Copilot before switching to Claude. The single-file architecture was the Copilot-era starting point, not a deliberate standard — the module split (Proton-39k) establishes the correct foundation.
 
 ## Git
 

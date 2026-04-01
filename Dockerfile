@@ -9,7 +9,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY protonvpn_gluetun_updater.py countries.json ./
+COPY countries.json index.html transform.py storage.py state.py protonvpn.py web.py protonvpn_gluetun_updater.py ./
 
 # Default environment variables
 ENV IP6=exclude
