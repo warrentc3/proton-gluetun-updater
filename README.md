@@ -14,7 +14,7 @@ A companion container for [Gluetun](https://github.com/qdm12/gluetun) that autom
 - Filter settings persist across restarts in `config.yaml` and can be changed at runtime without restarting
 - Caches raw API responses locally — avoids unnecessary requests on restart
 - Supports Docker secrets for credential storage
-- Single Python file, no extra runtime dependencies beyond `PyYAML` and the Proton library
+- Modular Python codebase — clean separation of auth, transform, storage, state, and web concerns
 
 ---
 
@@ -94,6 +94,8 @@ Set `STORAGE_FILEPATH` to Gluetun's data directory — or directly to `servers.j
 | `STORAGE_FILEPATH` | Yes | — | Intentionally used the same variable name as the Gluetun container, which maps to `/gluetun/servers.json`. |
 | `WEB_HOST` | No | `127.0.0.1` | Dashboard bind address. Set to `0.0.0.0` to expose inside Docker (control access via port binding or a reverse proxy). |
 | `WEB_PORT` | No | `8080` | Dashboard port. |
+| `AUTO_FETCH` | No | `off` | Set to `on` to automatically fetch a fresh server list on a recurring schedule. When `off`, the updater runs once and idles. |
+| `DEFER_AUTH` | No | `off` | Skip authentication on startup — go straight to idle with the dashboard serving. Auth happens on first manual Fetch Now. Set to `1`/`true`/`yes` to enable. Useful for testing without hitting the Proton API. |
 
 These filter variables are only applied **when `config.yaml` does not yet exist**. Once the file is created (first run), the dashboard controls or direct edits to `config.yaml` take precedence.
 | Variable | Required | Default | Description |
@@ -211,6 +213,7 @@ A light/dark toggle is fixed to the top-right corner. The preference is saved to
 
 | Method | Path | Description |
 | --- | --- | --- |
+| `GET` | `/health` | Health check. Returns `200` when healthy, `503` when in an unrecoverable state (configuration error or 2FA intervention needed). Used by the Docker `HEALTHCHECK`. |
 | `GET` | `/` | HTML dashboard |
 | `GET` | `/status` | JSON status payload (polled every 10 s by the dashboard) |
 | `POST` | `/config` | Save filter settings (form-encoded). Does not reprocess. |
