@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from state import _Status
 
 _HTML_PAGE = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+_REFRESH_COOLDOWN_SECS = 300
 
 
 def _fmt_uptime(start: float) -> str:
@@ -64,11 +65,12 @@ async def _read_http_request(reader: asyncio.StreamReader):
         return None
 
 
-def _http_respond(writer: asyncio.StreamWriter, status: str, ctype: str, body: str | bytes) -> None:
+def _http_respond(writer: asyncio.StreamWriter, status: str, ctype: str, body: str | bytes, extra_headers: dict[str, str] | None = None) -> None:
     """Write an HTTP/1.1 response."""
     b = body.encode() if isinstance(body, str) else body
+    extra = "".join(f"{k}: {v}\r\n" for k, v in (extra_headers or {}).items())
     writer.write(
-        f"HTTP/1.1 {status}\r\nContent-Type: {ctype}\r\nContent-Length: {len(b)}\r\nConnection: close\r\n\r\n".encode()
+        f"HTTP/1.1 {status}\r\nContent-Type: {ctype}\r\nContent-Length: {len(b)}\r\nConnection: close\r\n{extra}\r\n".encode()
         + b
     )
 
@@ -174,8 +176,17 @@ async def _web_handler(
 
         elif method == "POST" and path == "/refresh":
             if runtime.state in ("sleeping", "idle", "error"):
-                runtime.force_fetch.set()
-                _http_respond(writer, "200 OK", "application/json", '{"ok":true}')
+                elapsed = (time.time() - runtime.last_run_time) if runtime.last_run_time is not None else _REFRESH_COOLDOWN_SECS
+                if elapsed < _REFRESH_COOLDOWN_SECS:
+                    retry_after = int(_REFRESH_COOLDOWN_SECS - elapsed) + 1
+                    _http_respond(
+                        writer, "429 Too Many Requests", "text/plain",
+                        f"Cooldown active — last fetch was {int(elapsed)}s ago. Try again in {retry_after}s.",
+                        extra_headers={"Retry-After": str(retry_after)},
+                    )
+                else:
+                    runtime.force_fetch.set()
+                    _http_respond(writer, "200 OK", "application/json", '{"ok":true}')
             elif runtime.state in ("running", "authenticating", "waiting_tfa"):
                 _http_respond(writer, "409 Conflict", "text/plain", "An update is already in progress.")
             else:

@@ -52,6 +52,23 @@ tasks:
         -v $STORAGE_FILEPATH:$STORAGE_FILEPATH
         {{.IMAGE_NAME}}
 
+  local:
+    desc: Build (no cache) and run the local dev compose stack.
+    summary: |
+      Rebuilds the image without Docker layer cache to pick up any base image
+      security updates, then starts the local compose stack (docker-compose.local.yml).
+
+      Use this instead of plain 'docker compose up --build' to ensure apt and pip
+      layers are refreshed and open CVEs in the base image are closed.
+    preconditions:
+      - sh: command -v docker
+        msg: Docker is not installed or not in PATH.
+      - sh: test -f docker-compose.local.yml
+        msg: docker-compose.local.yml not found.
+    cmds:
+      - docker compose -f docker-compose.local.yml build --no-cache
+      - docker compose -f docker-compose.local.yml up
+
   update-gluetun-protonvpn-servers:
     desc: Update gluetun protonvpn servers list.
     summary: |
