@@ -118,6 +118,7 @@ async def _web_handler(
                 "stats": runtime.last_stats,
                 "needs_tfa_intervention": runtime.tfa.needs_intervention,
                 "reauth_failures": runtime.tfa.reauth_failures,
+                "ipv6_routable": runtime.ipv6_routable,
                 "config": {
                     "ip6": runtime.config.ip6,
                     "secure_core": runtime.config.secure_core,

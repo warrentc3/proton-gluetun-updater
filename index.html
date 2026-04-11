@@ -21,6 +21,8 @@
     .s-waiting_tfa{background:#451a03;color:#fdba74;animation:pulse 1s ease-in-out infinite}
     .s-error{background:#450a0a;color:#fca5a5}
     @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+    @keyframes pulse-slow{0%,100%{opacity:1}50%{opacity:.15}}
+    .ipv6-warn{color:#ef4444;font-size:.6rem;margin-left:.35rem;vertical-align:middle;animation:pulse-slow 2.5s ease-in-out infinite}
     .grid{display:grid;grid-template-columns:1fr 1fr;gap:.8rem 2rem}
     .stat label{display:block;font-size:.68rem;color:#64748b;text-transform:uppercase;
                 letter-spacing:.08em;margin-bottom:.2rem}
@@ -196,7 +198,7 @@
     <summary id="filter_heading" class="section-heading">Filter Configuration</summary>
     <form id="cfg_form">
     <div class="filter-grid" id="filter_grid">
-      <div class="filter-item" id="fi_ip6"><label for="sel_ip6">IP6</label>
+      <div class="filter-item" id="fi_ip6"><label for="sel_ip6">IP6<span id="ipv6_warn" class="ipv6-warn" style="display:none">no route</span></label>
         <select id="sel_ip6" name="ip6"><option>include</option><option>exclude</option><option>only</option></select></div>
       <div class="filter-item" id="fi_secure_core"><label for="sel_secure_core">Secure Core</label>
         <select id="sel_secure_core" name="secure_core"><option>include</option><option>exclude</option><option>only</option></select></div>
@@ -327,6 +329,8 @@
         }
         var rm=document.getElementById('reauth_msg');
         if(rm){rm.style.display=d.needs_tfa_intervention?'block':'none';}
+        var iw=document.getElementById('ipv6_warn');
+        if(iw){iw.style.display=(d.ipv6_routable===false)?'':'none';}
         set('ts',new Date().toLocaleTimeString());
       }catch(e){}
     }

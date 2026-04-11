@@ -24,6 +24,7 @@ import json
 import os
 import random
 import signal
+import socket
 import sys
 import time
 from pathlib import Path
@@ -47,6 +48,22 @@ from storage import (
     _save_api_cache,
 )
 from transform import _validate_servers_json, transform
+
+
+def _probe_ipv6() -> bool:
+    """Return True if the container has a routable IPv6 path.
+
+    Uses a SOCK_DGRAM connect to Cloudflare's IPv6 DNS address — no packets
+    are sent; the kernel rejects the call immediately if no route exists.
+    """
+    try:
+        s = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+        s.settimeout(2)
+        s.connect(("2606:4700:4700::1111", 80))
+        s.close()
+        return True
+    except OSError:
+        return False
 from web import _start_web_server
 
 
@@ -279,6 +296,9 @@ async def main():
     )
     broker = _TfaBroker()
     web_server = await _start_web_server(web_host, web_port, runtime, broker)
+
+    runtime.ipv6_routable = _probe_ipv6()
+    print(f"IPv6 routability: {'routable' if runtime.ipv6_routable else 'not routable'}", file=sys.stderr)
 
     # Check credentials now that the web server is up so errors are visible on the dashboard
     if not defer_auth:

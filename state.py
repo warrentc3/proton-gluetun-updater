@@ -49,3 +49,4 @@ class _Status:
     configuration_error: bool = False
     cache_dir: Path | None = None  # set after STORAGE_FILEPATH is resolved
     force_fetch: asyncio.Event = dataclasses.field(default_factory=asyncio.Event)
+    ipv6_routable: bool | None = None
