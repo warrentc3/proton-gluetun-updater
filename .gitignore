@@ -6,6 +6,7 @@ __pycache__/
 servers.json
 servers-proton.json
 docker-compose.local.yml
+docker-compose.test.yml
 
 # Beads / Dolt files
 .beads
@@ -21,3 +22,4 @@ code-review/
 
 # Beads-generated agent instructions
 AGENTS.md
+CLAUDE.md
