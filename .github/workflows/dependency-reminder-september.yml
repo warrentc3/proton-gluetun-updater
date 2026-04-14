@@ -1,0 +1,53 @@
+name: September Dependency Review Reminder
+
+on:
+  schedule:
+    # September 1st at 09:00 UTC every year
+    - cron: '0 9 1 9 *'
+  workflow_dispatch:
+
+jobs:
+  open-reminder-issue:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+
+    steps:
+      - name: Open yearly dependency review reminder issue
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const year = new Date().getUTCFullYear();
+            const title = `Reminder: Review python-proton-core pin (${year})`;
+
+            const openIssues = await github.paginate(
+              github.rest.issues.listForRepo,
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                state: 'open',
+                per_page: 100
+              }
+            );
+
+            if (openIssues.some((issue) => issue.title === title)) {
+              core.info(`Reminder issue already exists: ${title}`);
+              return;
+            }
+
+            const body = [
+              'Annual reminder to review dependency versions in September.',
+              '',
+              'Checklist:',
+              '- Check latest stable tag/release for `ProtonVPN/python-proton-core`.',
+              '- Update `requirements.txt` pin if needed.',
+              '- Rebuild image and review Trivy findings.',
+              '- Merge if validation passes.'
+            ].join('\n');
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              body
+            });

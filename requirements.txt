@@ -1,2 +1,2 @@
-proton-core @ git+https://github.com/ProtonVPN/python-proton-core.git
+proton-core @ git+https://github.com/ProtonVPN/python-proton-core.git@v0.7.0
 PyYAML
