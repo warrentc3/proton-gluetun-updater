@@ -8,12 +8,6 @@ servers-proton.json
 docker-compose.local.yml
 docker-compose.test.yml
 
-# Beads / Dolt files
-.beads
-.dolt/
-.beads-credential-key
-.beads-project
-
 # Session state
 CONTEXT.md
 

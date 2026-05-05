@@ -1,9 +1,10 @@
-FROM python:3.14.0-slim
+FROM python:3.14.4-alpine3.23
 
-RUN apt-get update && \
-    apt-get upgrade -y && \
-    apt-get install -y --no-install-recommends git gnupg && \
-    rm -rf /var/lib/apt/lists/*
+# Vuln safeguard: upgrade base packages at build time so a stale tag
+# can't ship known-patched CVEs. Do not drop on aesthetic grounds —
+# the trivy gate depends on this. Mirrors the prior apt-get upgrade -y.
+RUN apk upgrade --no-cache && \
+    apk add --no-cache git gnupg tzdata
 
 WORKDIR /app
 
