@@ -1,4 +1,4 @@
-FROM python:3.14.4-alpine3.23
+FROM python:3.15.0a8-alpine3.23
 
 # Vuln safeguard: upgrade base packages at build time so a stale tag
 # can't ship known-patched CVEs. Do not drop on aesthetic grounds —
