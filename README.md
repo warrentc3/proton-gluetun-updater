@@ -96,6 +96,8 @@ Set `STORAGE_FILEPATH` to Gluetun's data directory — or directly to `servers.j
 | `WEB_PORT` | No | `8080` | Dashboard port. |
 | `AUTO_FETCH` | No | `off` | Set to `on` to automatically fetch a fresh server list on a recurring schedule. When `off`, the updater runs once and idles. |
 | `DEFER_AUTH` | No | `off` | Skip authentication on startup — go straight to idle with the dashboard serving. Auth happens on first manual Fetch Now. Set to `1`/`true`/`yes` to enable. Useful for testing without hitting the Proton API. |
+| `PROTON_APP_VERSION` | No | `linux-vpn-cli@4.19.0` | App version identifier sent to the Proton API. Override if Proton rejects the default with `HTTP 422` / error `5003` ("This version of the app is no longer supported"). |
+| `PROTON_USER_AGENT` | No | `ProtonVPN/4.19.0 (Linux)` | User-Agent sent to the Proton API. Keep its version in line with `PROTON_APP_VERSION`. |
 
 These filter variables are only applied **when `config.yaml` does not yet exist**. Once the file is created (first run), the dashboard controls or direct edits to `config.yaml` take precedence.
 | Variable | Required | Default | Description |

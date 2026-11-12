@@ -15,6 +15,7 @@ pattern for how such providers should be handled.
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 import time
 from typing import TYPE_CHECKING
@@ -25,8 +26,10 @@ from proton.session.exceptions import ProtonAPI2FANeeded, ProtonAPIAuthenticatio
 if TYPE_CHECKING:
     from state import _Status, _TfaState
 
-APP_VERSION = "linux-vpn-cli@4.15.2"
-USER_AGENT = "ProtonVPN/4.15.2 (Linux)"
+# Proton rejects outdated app versions (HTTP 422 / error 5003), so both
+# identifiers can be overridden without rebuilding the image.
+APP_VERSION = os.environ.get("PROTON_APP_VERSION", "").strip() or "linux-vpn-cli@4.19.0"
+USER_AGENT = os.environ.get("PROTON_USER_AGENT", "").strip() or "ProtonVPN/4.19.0 (Linux)"
 LOGICALS_ENDPOINT = "/vpn/v1/logicals?SecureCoreFilter=all&WithIpV6=1"
 
 
