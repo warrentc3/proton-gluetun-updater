@@ -10,6 +10,7 @@ import os
 import sys
 import tempfile
 import time
+import urllib.request
 from pathlib import Path
 
 import yaml
@@ -58,6 +59,20 @@ _FILTER_CHOICES: dict[str, tuple[str, ...]] = {
 
 _CACHE_MAX_AGE_SECONDS = 12 * 3600  # 12 hours
 
+# Proton's Linux clients identify themselves with the version of the shared
+# proton-vpn-api-core library, and Proton rejects versions that fall too far
+# behind (HTTP 422 / error 5003). Rather than pin a number in this code, the
+# version is read from that library's published release history at startup.
+_VERSIONS_URL = (
+    "https://raw.githubusercontent.com/ProtonVPN/"
+    "python-proton-vpn-api-core/stable/versions.yml"
+)
+
+# config.yaml keys written by the updater itself, not user settings. They
+# record the client identity derived from versions.yml at the last startup
+# and are overwritten on every startup — editing them has no effect.
+_CLIENT_RECORD_KEYS: tuple[str, ...] = ("proton_app_version", "proton_user_agent")
+
 
 # ---------------------------------------------------------------------------
 # Atomic file write
@@ -83,17 +98,37 @@ def _atomic_write(path: str, content: str) -> None:
 # Config persistence
 # ---------------------------------------------------------------------------
 
-def _save_filter_config(config_file: Path, values: dict) -> None:
-    """Write filter values to config.yaml with a human-readable header comment."""
+def _read_client_record(config_file: Path) -> dict:
+    """Return the client-identity record keys currently in config.yaml, if any."""
+    try:
+        with open(config_file, encoding="utf-8") as f:
+            raw = yaml.safe_load(f) or {}
+    except (OSError, yaml.YAMLError):
+        return {}
+    return {k: str(raw[k]) for k in _CLIENT_RECORD_KEYS if raw.get(k)}
+
+
+def _save_filter_config(config_file: Path, values: dict, client_record: dict | None = None) -> None:
+    """
+    Write filter values to config.yaml with a human-readable header comment.
+
+    The client-identity record keys are carried through from the existing file
+    unless client_record is given, so filter saves (startup validation, the
+    dashboard's POST /config) never drop them.
+    """
+    if client_record is None:
+        client_record = _read_client_record(config_file)
     header = (
         "# ProtonVPN Gluetun Updater — filter configuration\n"
         "# ip6, secure_core, tor, free_tier: include | exclude | only\n"
         "# gluetun_json: none | replace | update\n"
         "# auto_fetch: off (run once, fetch manually) | on (recurring fetch with session keep-alive)\n"
+        "# proton_app_version, proton_user_agent: written by the updater at startup from\n"
+        "#   versions.yml (record only — overwritten every startup, not a setting)\n"
     )
     with open(config_file, "w", encoding="utf-8") as f:
         f.write(header)
-        yaml.dump(values, f, default_flow_style=False, sort_keys=True, allow_unicode=True)
+        yaml.dump({**values, **client_record}, f, default_flow_style=False, sort_keys=True, allow_unicode=True)
 
 
 def _load_or_create_filter_config(cache_dir: Path, env_defaults: dict) -> dict:
@@ -133,11 +168,84 @@ def _load_or_create_filter_config(cache_dir: Path, env_defaults: dict) -> dict:
             needs_rewrite = True
         values[key] = raw_val
 
-    # Remove unknown keys from the file
-    if needs_rewrite or set(raw.keys()) - set(_FILTER_DEFAULTS):
+    # Remove unknown keys from the file (the client-identity record is not unknown)
+    if needs_rewrite or set(raw.keys()) - set(_FILTER_DEFAULTS) - set(_CLIENT_RECORD_KEYS):
         _save_filter_config(config_file, values)
 
     return values
+
+
+# ---------------------------------------------------------------------------
+# Proton client version
+# ---------------------------------------------------------------------------
+
+def _pick_client_version(versions_text: str) -> str:
+    """
+    Return the version to identify as, given the text of versions.yml.
+
+    The pick is the highest patch release of the minor release before the
+    current one (e.g. newest 6.1.2 with a 6.0.x line present -> 6.0.1). One
+    minor behind is certain to be released and known to Proton's API, while
+    staying far ahead of the minimum version it enforces.
+    """
+    versions: set[tuple[int, int, int]] = set()
+    for doc in yaml.safe_load_all(versions_text):
+        if not isinstance(doc, dict):
+            continue
+        parts = str(doc.get("version", "")).split(".")
+        if len(parts) == 3 and all(p.isdigit() for p in parts):
+            versions.add((int(parts[0]), int(parts[1]), int(parts[2])))
+    if not versions:
+        raise ValueError("versions.yml contains no x.y.z versions")
+    current_minor = max(versions)[:2]
+    previous = [v for v in versions if v[:2] < current_minor]
+    if not previous:
+        raise ValueError("versions.yml has no minor release before the current one")
+    return ".".join(str(n) for n in max(previous))
+
+
+def _resolve_client_identity(cache_dir: Path) -> tuple[str, str]:
+    """
+    Fetch versions.yml into cache_dir, derive (app_version, user_agent) from
+    it, and record both in config.yaml. Called once at startup, before the web
+    server is started, so no dashboard config save can interleave with the
+    config.yaml read-and-rewrite below.
+
+    If the fetch fails, the versions.yml saved by an earlier startup is used.
+    Raises RuntimeError when there is neither a fetch nor a saved copy.
+    """
+    versions_file = cache_dir / "versions.yml"
+    try:
+        with urllib.request.urlopen(_VERSIONS_URL, timeout=10) as resp:
+            text = resp.read().decode("utf-8")
+        _pick_client_version(text)  # don't replace a good saved copy with an unusable one
+        _atomic_write(str(versions_file), text)
+        print(f"Saved Proton client release history to {versions_file}", file=sys.stderr)
+    except Exception as e:
+        if not versions_file.exists():
+            raise RuntimeError(f"Could not fetch {_VERSIONS_URL}: {e}") from e
+        print(
+            f"Warning: could not fetch versions.yml ({e}) — using saved copy {versions_file}.",
+            file=sys.stderr,
+        )
+        text = versions_file.read_text(encoding="utf-8")
+
+    version = _pick_client_version(text)
+    app_version = f"linux-vpn-cli@{version}"
+    user_agent = f"ProtonVPN/{version} (Linux)"
+
+    config_file = cache_dir / "config.yaml"
+    try:
+        with open(config_file, encoding="utf-8") as f:
+            raw = yaml.safe_load(f) or {}
+    except (OSError, yaml.YAMLError):
+        raw = {}
+    filter_values = {k: raw.get(k, default) for k, default in _FILTER_DEFAULTS.items()}
+    _save_filter_config(
+        config_file, filter_values,
+        client_record={"proton_app_version": app_version, "proton_user_agent": user_agent},
+    )
+    return app_version, user_agent
 
 
 # ---------------------------------------------------------------------------

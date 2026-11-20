@@ -45,6 +45,7 @@ from storage import (
     _atomic_write,
     _load_cached_api,
     _load_or_create_filter_config,
+    _resolve_client_identity,
     _save_api_cache,
 )
 from transform import _validate_servers_json, transform
@@ -259,6 +260,17 @@ async def main():
     cache_dir = Path(storage_path) / "proton"
     filter_config = _load_or_create_filter_config(cache_dir, env_defaults)
 
+    # Resolve the client identity sent to Proton and record it in config.yaml.
+    # This runs to completion before the web server starts: authentication
+    # cannot be attempted without it, and nothing else can write config.yaml
+    # (the dashboard's POST /config) while the record is being written.
+    version_error: Exception | None = None
+    try:
+        app_version, user_agent = _resolve_client_identity(cache_dir)
+        print(f"Proton client identity: {app_version}", file=sys.stderr)
+    except Exception as ver_err:
+        version_error = ver_err
+
     ipv6_filter = filter_config["ip6"]
     secure_core_filter = filter_config["secure_core"]
     tor_filter = filter_config["tor"]
@@ -300,6 +312,19 @@ async def main():
     runtime.ipv6_routable = _probe_ipv6()
     print(f"IPv6 routability: {'routable' if runtime.ipv6_routable else 'not routable'}", file=sys.stderr)
 
+    # A failed identity resolve wrote nothing; surface it on the dashboard and stop here.
+    if version_error is not None:
+        msg = f"Could not determine the Proton client version: {version_error}"
+        print(f"Error: {msg}", file=sys.stderr)
+        runtime.state = "error"
+        runtime.last_error = msg
+        runtime.configuration_error = True
+        await stop_event.wait()
+        runtime.state = "shutting_down"
+        web_server.close()
+        await web_server.wait_closed()
+        return
+
     # Check credentials now that the web server is up so errors are visible on the dashboard
     if not defer_auth:
         _missing = []
@@ -330,7 +355,7 @@ async def main():
     else:
         runtime.state = "authenticating"
         try:
-            session = await _authenticate(username, password)
+            session = await _authenticate(username, password, app_version, user_agent)
         except Exception as auth_err:
             runtime.state = "error"
             runtime.last_error = f"Authentication failed: {auth_err}"
@@ -359,7 +384,7 @@ async def main():
                     continue
                 runtime.state = "authenticating"
                 try:
-                    session = await _authenticate(username, password)
+                    session = await _authenticate(username, password, app_version, user_agent)
                 except Exception as auth_err:
                     runtime.state = "error"
                     runtime.last_error = f"Authentication failed: {auth_err}"
@@ -401,7 +426,7 @@ async def main():
                 except Exception:
                     pass
                 try:
-                    session = await _authenticate(username, password)
+                    session = await _authenticate(username, password, app_version, user_agent)
                 except Exception as auth_err:
                     runtime.state = "error"
                     runtime.last_error = f"Re-authentication failed: {auth_err}"
@@ -490,7 +515,7 @@ async def main():
                     except Exception:
                         pass
                     try:
-                        session = await _authenticate(username, password)
+                        session = await _authenticate(username, password, app_version, user_agent)
                     except Exception as auth_err:
                         runtime.state = "error"
                         runtime.last_error = f"Re-authentication failed: {auth_err}"

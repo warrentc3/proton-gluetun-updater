@@ -15,7 +15,6 @@ pattern for how such providers should be handled.
 from __future__ import annotations
 
 import asyncio
-import os
 import sys
 import time
 from typing import TYPE_CHECKING
@@ -26,10 +25,6 @@ from proton.session.exceptions import ProtonAPI2FANeeded, ProtonAPIAuthenticatio
 if TYPE_CHECKING:
     from state import _Status, _TfaState
 
-# Proton rejects outdated app versions (HTTP 422 / error 5003), so both
-# identifiers can be overridden without rebuilding the image.
-APP_VERSION = os.environ.get("PROTON_APP_VERSION", "").strip() or "linux-vpn-cli@4.19.0"
-USER_AGENT = os.environ.get("PROTON_USER_AGENT", "").strip() or "ProtonVPN/4.19.0 (Linux)"
 LOGICALS_ENDPOINT = "/vpn/v1/logicals?SecureCoreFilter=all&WithIpV6=1"
 
 
@@ -72,15 +67,20 @@ class _TfaBroker:
         return True
 
 
-async def _authenticate(username: str, password: str) -> Session:
+async def _authenticate(username: str, password: str, app_version: str, user_agent: str) -> Session:
     """
     Create a Session and perform initial password authentication via SRP.
+
+    app_version and user_agent are the client identity sent to the Proton API
+    (e.g. "linux-vpn-cli@6.0.1", "ProtonVPN/6.0.1 (Linux)"). Proton rejects
+    outdated versions (HTTP 422 / error 5003), so the caller supplies a current
+    one rather than this module pinning a number.
 
     The caller is responsible for calling session.async_logout() when done.
     Raises ProtonAPIAuthenticationNeeded on failure.
     """
-    session = Session(appversion=APP_VERSION, user_agent=USER_AGENT)
-    print("Authenticating...", file=sys.stderr)
+    session = Session(appversion=app_version, user_agent=user_agent)
+    print(f"Authenticating as {app_version}...", file=sys.stderr)
     success = await session.async_authenticate(username, password)
     if not success:
         raise ProtonAPIAuthenticationNeeded("Authentication failed — check credentials.")
