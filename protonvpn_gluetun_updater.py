@@ -260,6 +260,17 @@ async def main():
     cache_dir = Path(storage_path) / "proton"
     filter_config = _load_or_create_filter_config(cache_dir, env_defaults)
 
+    # Resolve the client identity sent to Proton and record it in config.yaml.
+    # This runs to completion before the web server starts: authentication
+    # cannot be attempted without it, and nothing else can write config.yaml
+    # (the dashboard's POST /config) while the record is being written.
+    version_error: Exception | None = None
+    try:
+        app_version, user_agent = _resolve_client_identity(cache_dir)
+        print(f"Proton client identity: {app_version}", file=sys.stderr)
+    except Exception as ver_err:
+        version_error = ver_err
+
     ipv6_filter = filter_config["ip6"]
     secure_core_filter = filter_config["secure_core"]
     tor_filter = filter_config["tor"]
@@ -301,12 +312,9 @@ async def main():
     runtime.ipv6_routable = _probe_ipv6()
     print(f"IPv6 routability: {'routable' if runtime.ipv6_routable else 'not routable'}", file=sys.stderr)
 
-    # Resolve the client identity sent to Proton, once per startup. Done after
-    # the web server is up so a failure is visible on the dashboard.
-    try:
-        app_version, user_agent = await asyncio.to_thread(_resolve_client_identity, cache_dir)
-    except Exception as ver_err:
-        msg = f"Could not determine the Proton client version: {ver_err}"
+    # A failed identity resolve wrote nothing; surface it on the dashboard and stop here.
+    if version_error is not None:
+        msg = f"Could not determine the Proton client version: {version_error}"
         print(f"Error: {msg}", file=sys.stderr)
         runtime.state = "error"
         runtime.last_error = msg
@@ -316,7 +324,6 @@ async def main():
         web_server.close()
         await web_server.wait_closed()
         return
-    print(f"Proton client identity: {app_version}", file=sys.stderr)
 
     # Check credentials now that the web server is up so errors are visible on the dashboard
     if not defer_auth:

@@ -207,7 +207,9 @@ def _pick_client_version(versions_text: str) -> str:
 def _resolve_client_identity(cache_dir: Path) -> tuple[str, str]:
     """
     Fetch versions.yml into cache_dir, derive (app_version, user_agent) from
-    it, and record both in config.yaml. Called once at startup.
+    it, and record both in config.yaml. Called once at startup, before the web
+    server is started, so no dashboard config save can interleave with the
+    config.yaml read-and-rewrite below.
 
     If the fetch fails, the versions.yml saved by an earlier startup is used.
     Raises RuntimeError when there is neither a fetch nor a saved copy.
